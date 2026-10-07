@@ -25,7 +25,7 @@ def _kb(rows: list[list[tuple[str, str]]]) -> Kb:
 def deck_list(store: Store, user_id: int) -> tuple[str, Kb]:
     decks = store.decks(user_id)
     user = store.get_user(user_id)
-    queue = srs.due_queue(store, user, datetime.now(timezone.utc))
+    queue = srs.due_today(store, user, datetime.now(timezone.utc))
     if not decks:
         return (
             "You have no decks yet. Tell me what you're learning, for example "
@@ -44,7 +44,7 @@ def deck_list(store: Store, user_id: int) -> tuple[str, Kb]:
 def deck_view(store: Store, deck_id: int) -> tuple[str, Kb]:
     d = store.deck(deck_id)
     user = store.get_user(d["user_id"])
-    queue = srs.due_queue(store, user, datetime.now(timezone.utc))
+    queue = srs.due_today(store, user, datetime.now(timezone.utc))
     due = sum(1 for c in queue if c["deck_id"] == deck_id)
     label = DECK_TYPES.get(d["deck_type"], {}).get("label", d["deck_type"])
     text = (

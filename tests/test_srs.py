@@ -104,3 +104,14 @@ def test_day_rolls_over_at_end_of_quiet_hours(user):
     assert srs.day_start(user, at("2026-10-08 01:00")) == at("2026-10-07 08:00")
     assert srs.day_start(user, at("2026-10-08 09:00")) == at("2026-10-08 08:00")
     assert srs.awake_end(user, at("2026-10-08 09:00")) == at("2026-10-09 00:00")
+
+
+def test_card_in_learning_counts_as_due_today(store, user):
+    make_deck(store, 1)
+    card = store.user_cards(UID)[0]
+    now = at("2026-10-07 10:00")
+    srs.grade(store, user, card["id"], 3, "claude", None, now)
+    assert srs.due_queue(store, user, now) == []  # not askable yet
+    later = srs.coming_back_today(store, user, now)
+    assert [c["id"] for c in later] == [card["id"]]
+    assert len(srs.due_today(store, user, now)) == 1

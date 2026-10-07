@@ -211,7 +211,7 @@ class Agent:
 
     def _end_session(self, turn: Turn) -> timedelta:
         uid = turn.user["id"]
-        remaining = len(srs.due_queue(self.store, turn.user, turn.now))
+        remaining = len(srs.due_today(self.store, turn.user, turn.now))
         gap = pacing.gap_until_next_session(
             turn.now, srs.awake_end(turn.user, turn.now), remaining, turn.user["cards_per_session"]
         )
@@ -250,6 +250,7 @@ class Agent:
         st = self.store.state(uid)
         quiet = srs.is_quiet(u, now)
         queue = srs.due_queue(self.store, u, now)
+        later = srs.coming_back_today(self.store, u, now)
 
         lines = [
             "<context>",
@@ -262,7 +263,7 @@ class Agent:
         if decks:
             lines.append("Decks:")
             for d in decks:
-                due_n = sum(1 for c in queue if c["deck_id"] == d["id"])
+                due_n = sum(1 for c in queue + later if c["deck_id"] == d["id"])
                 lines.append(
                     f"- \"{d['name']}\" (id {d['id']}, {d['deck_type']}, fields: {', '.join(deck_fields(d))}; "
                     f"reverse {'on' if d['reverse'] else 'off'}; limits {d['new_per_day']} new / "
@@ -292,6 +293,17 @@ class Agent:
                 deck = self.store.deck(note["deck_id"])
                 prompt, _ = card_sides(deck_fields(deck), note_fields(note["fields"]), c["ord"])
                 lines.append(f"  #{c['id']}: {prompt}")
+        if later:
+            lines.append(
+                f"Coming back later today ({len(later)}; learning steps after a recent answer, "
+                "not askable yet; the code brings them up when due):"
+            )
+            for c in later[:DUE_LIST_LIMIT]:
+                note = self.store.note(c["note_id"])
+                deck = self.store.deck(note["deck_id"])
+                prompt, _ = card_sides(deck_fields(deck), note_fields(note["fields"]), c["ord"])
+                at = parse(c["due"]).astimezone(tz).strftime("%H:%M")
+                lines.append(f"  #{c['id']}: {prompt} (at {at})")
         if st["editing_proposal_id"]:
             p = self.store.proposal(st["editing_proposal_id"])
             if p and p["status"] == "pending":
@@ -488,7 +500,7 @@ class Agent:
                         f"in the same message, without revealing its answer:\n" + self._card_brief(nxt, True)
                     )
             gap = self._end_session(turn)
-            left = len(srs.due_queue(store, turn.user, turn.now))
+            left = len(srs.due_today(store, turn.user, turn.now))
             if left:
                 return (
                     f"Graded {srs.RATING_NAMES[rating]}. Session done: do NOT ask another card now. "

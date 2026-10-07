@@ -224,3 +224,22 @@ async def test_prompt_stays_small(agent, llm, store):
     assert "x" * 600 not in prompt  # older long messages are shortened
     assert "y" * 900 in prompt  # the newest message is kept whole, once
     assert prompt.count("y" * 900) == 1
+
+
+async def test_context_lists_cards_coming_back_later(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    llm.script.append(lambda p, t: _ret("What does ubiquitous mean?"))
+    await agent.ask_next(UID, NOW)
+    card_id = store.state(UID)["active_card_id"]
+
+    async def grade(prompt, t):
+        await t["grade_card"]({"card_id": card_id, "rating": "Good", "reason": "ok"})
+        return "Yes!"
+
+    llm.script.append(grade)
+    await agent.on_user_message(UID, "everywhere", NOW)
+    llm.script.append(lambda p, t: _ret("It comes back at 12:10."))
+    await agent.on_user_message(UID, "why 0 due?", NOW + timedelta(minutes=1))
+    prompt = llm.prompts[-1]
+    assert "Coming back later today (1" in prompt
+    assert "1 due today" in prompt

@@ -204,6 +204,23 @@ def due_queue(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict
     return out
 
 
+def coming_back_today(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict[str, Any]]:
+    """Cards in learning steps (new or forgotten) that come back later today, earliest first."""
+    day_end = day_start(user, now) + timedelta(days=1)
+    out = []
+    for c in store.user_cards(user["id"]):
+        buried = parse(c["buried_until"])
+        due = parse(c["due"])
+        if c["state"] in (1, 3) and due and now < due < day_end and not (buried and buried > now):
+            out.append(dict(c))
+    return sorted(out, key=lambda c: c["due"])
+
+
+def due_today(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict[str, Any]]:
+    """Everything still to review today: due now, plus learning cards coming back later today."""
+    return due_queue(store, user, now) + coming_back_today(store, user, now)
+
+
 def next_learning_due(store: Store, user: Mapping[str, Any], now: datetime) -> datetime | None:
     """Earliest future due time of a learning/relearning card (wrong answers coming back)."""
     times = [
