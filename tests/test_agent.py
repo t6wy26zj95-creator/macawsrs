@@ -294,3 +294,42 @@ async def test_revised_preview_is_resent_at_the_bottom(agent, llm, store):
     await app.send_actions(UID, await agent.on_user_message(UID, "add an example", NOW))
     assert app.bot.deleted == [p["message_id"]]
     assert store.proposal(p["id"])["message_id"] != p["message_id"]
+
+
+async def test_set_next_card_time_withdraws_question_and_ticker_asks_then(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    app = _app(store, agent)
+    llm.script.append(lambda p, t: _ret("What does ubiquitous mean?"))
+    await agent.ask_next(UID, NOW)
+    assert store.state(UID)["active_card_id"]
+
+    async def later(prompt, t):
+        assert "TIMER: waiting for the answer" in prompt
+        out = await t["set_next_card_time"]({"minutes": 10})
+        assert "12:10" in out  # Berlin time
+        return "Sure, in 10 minutes."
+
+    llm.script.append(later)
+    await agent.on_user_message(UID, "ask me in 10 minutes", NOW)
+    assert store.state(UID)["active_card_id"] is None
+
+    llm.script.append(lambda p, t: _ret("Not yet"))
+    await app.tick(NOW + timedelta(minutes=5))
+    assert app.bot.sent == []
+    llm.script.clear()
+
+    async def ask(prompt, t):
+        assert "ACTIVE CARD (asked" in prompt
+        return "Time's up: what does ubiquitous mean?"
+
+    llm.script.append(ask)
+    await app.tick(NOW + timedelta(minutes=11))
+    assert app.bot.sent == ["Time's up: what does ubiquitous mean?"]
+
+
+async def test_context_shows_when_the_next_card_comes(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    store.update_state(UID, next_ask_at="2026-10-07T10:40:00+00:00")
+    llm.script.append(lambda p, t: _ret("ok"))
+    await agent.on_user_message(UID, "when is the next one?", NOW)
+    assert "TIMER: the code brings up the next card at about 12:40." in llm.prompts[-1]
