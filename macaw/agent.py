@@ -209,6 +209,30 @@ class Agent:
         )
         return card
 
+    def _timer_line(self, turn: Turn, st: Any, active: bool, queue: list[dict[str, Any]]) -> str:
+        """What the code will do next on its own, so Claude never has to guess or promise."""
+        u, now = turn.user, turn.now
+        fmt = lambda t: t.astimezone(srs.tz_of(u)).strftime("%H:%M")  # noqa: E731
+        if active:
+            asked = parse(st["asked_at"])
+            if not asked or st["reminders_today"] >= u["max_reminders"]:
+                return "TIMER: waiting for the answer; no more reminders today."
+            at = pacing.next_reminder_at(
+                last_user_at=parse(st["last_user_at"]), asked_at=asked,
+                streak=st["reminders_streak"], first_gap_min=u["first_reminder_min"],
+            )
+            return f"TIMER: waiting for the answer; a reminder goes out around {fmt(at)} if there is none."
+        if not queue:
+            later = srs.next_learning_due(self.store, u, now)
+            if later and later < srs.next_day_start(u, now):
+                return f"TIMER: nothing to ask right now; the next card comes back around {fmt(later)}."
+            return "TIMER: nothing left to ask today."
+        nxt = parse(st["next_ask_at"])
+        at = max(nxt, now) if nxt else now
+        if srs.is_quiet(u, at):
+            return f"TIMER: next card at {fmt(at)} is in quiet hours, so only if the user is chatting then."
+        return f"TIMER: the code brings up the next card at about {fmt(at)}."
+
     def _end_session(self, turn: Turn) -> timedelta:
         uid = turn.user["id"]
         remaining = len(srs.due_today(self.store, turn.user, turn.now))
@@ -281,6 +305,8 @@ class Agent:
             lines.append(self._card_brief(dict(self.store.card(active)), with_answer=True))
         else:
             lines.append("ACTIVE CARD: none. Do not quiz the user on your own; call next_card if they want one.")
+
+        lines.append(self._timer_line(turn, st, bool(active and self.store.card(active)), queue))
 
         others = [c for c in queue if c["id"] != active]
         if others:
@@ -544,6 +570,23 @@ class Agent:
                 return "Nothing is due right now. Tell the user they're all caught up (or offer to add new cards)."
             return "Ask this card now, without revealing the answer:\n" + self._card_brief(card, True)
 
+        async def set_next_card_time(args):
+            minutes = min(720, max(0, int(args["minutes"])))
+            st = store.state(uid)
+            when = turn.now + timedelta(minutes=minutes)
+            changes: dict[str, Any] = {"next_ask_at": iso(when), "session_count": 0, "burst": 0}
+            if st["active_card_id"]:
+                # The open question is withdrawn; the card stays due and comes up at the new time.
+                changes.update(active_card_id=None, asked_at=None)
+            store.update_state(uid, **changes)
+            local = when.astimezone(srs.tz_of(turn.user)).strftime("%H:%M")
+            msg = f"The code will bring up the next card at about {local} (within a minute)."
+            if st["active_card_id"]:
+                msg += " The open question was withdrawn; don't wait for an answer to it now."
+            if srs.is_quiet(turn.user, when):
+                msg += " That's in quiet hours, so it only happens if the user is chatting then."
+            return msg
+
         async def update_settings(args):
             changes: dict[str, Any] = {}
             if args.get("timezone"):
@@ -661,6 +704,13 @@ class Agent:
                 "The user wants to review now. Opens the next due card (count = how many in a row they want).",
                 _jsonschema({"count": INT}, []),
                 next_card,
+            ),
+            ToolSpec(
+                "set_next_card_time",
+                "The user wants the next card at a specific time ('in 10 minutes', 'at 23:00'). "
+                "minutes = minutes from now. Withdraws the open question, if any, until then.",
+                _jsonschema({"minutes": INT}, ["minutes"]),
+                set_next_card_time,
             ),
             ToolSpec(
                 "update_settings",
