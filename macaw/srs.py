@@ -252,16 +252,19 @@ def next_learning_due(store: Store, user: Mapping[str, Any], now: datetime) -> d
 
 
 def describe_interval(due: datetime, now: datetime) -> str:
+    def n(x: int, unit: str) -> str:
+        return f"{x} {unit}" + ("" if x == 1 else "s")
+
     delta = due - now
     minutes = max(1, round(delta.total_seconds() / 60))
     if minutes < 60:
         return f"{minutes} min"
     hours = minutes / 60
     if hours < 24:
-        return f"{round(hours)} h"
+        return n(round(hours), "hour")
     days = hours / 24
     if days < 60:
-        return f"{round(days)} d"
+        return n(round(days), "day")
     if days < 365:
-        return f"{round(days / 30)} mo"
-    return f"{days / 365:.1f} y"
+        return n(round(days / 30), "month")
+    return f"{days / 365:.1f} years"

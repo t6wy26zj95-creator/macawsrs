@@ -45,7 +45,13 @@ def rating_note(store: Store, log_id: int, now: datetime | None = None) -> tuple
     name = srs.RATING_NAMES[r["rating"]]
     who = "You" if r["source"] == "user" else "I"
     reason = f" · {html.escape(r['reason'])}" if r["reason"] and r["source"] != "user" else ""
-    text = f"<i>{who} rated: <b>{name}</b>{reason}\nnext review in {srs.describe_interval(due, now)}</i>"
+    user = store.card_owner(r["card_id"])
+    when = due.astimezone(srs.tz_of(user))
+    day = when.strftime("%H:%M") if when.date() == now.astimezone(srs.tz_of(user)).date() else when.strftime("%a %d %b")
+    text = (
+        f"<i>{who} rated: <b>{name}</b>{reason}\n"
+        f"This card comes back in {srs.describe_interval(due, now)} ({day})</i>"
+    )
     row = []
     for value, label in srs.RATING_NAMES.items():
         mark = "• " if value == r["rating"] else ""
