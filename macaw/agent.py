@@ -7,6 +7,7 @@ Claude can only change state through the tools defined here.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -28,6 +29,13 @@ from .templates import (
 )
 
 log = logging.getLogger(__name__)
+
+# Emoji and pictographs, plus the joiners and variation selectors that glue them together.
+EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D]")
+
+
+def strip_emoji(text: str) -> str:
+    return re.sub(r"[ \t]{2,}", " ", EMOJI.sub("", text)).strip()
 
 
 # ---------- actions the Telegram layer performs after a turn ----------
@@ -140,7 +148,7 @@ class Agent:
     async def _run(self, turn: Turn, event: str) -> list[Action]:
         uid = turn.user["id"]
         prompt = self._context(turn) + "\n\n<event>\n" + event + "\n</event>"
-        reply = await self.llm.run(SYSTEM_PROMPT, prompt, self._tools(turn))
+        reply = strip_emoji(await self.llm.run(SYSTEM_PROMPT, prompt, self._tools(turn)))
         if reply:
             self._postpone_leaks(turn, reply, exclude=None)
             # The reply normally comes first. When it already asks the next card,
@@ -655,7 +663,7 @@ class Agent:
         self.store.update_proposal(proposal_id, status="added", note_id=note_id)
         self.store.update_state(user_id, editing_proposal_id=None)
         self.store.log_message(user_id, "note", f"user added {values.get(fields[0])!r} to {d['name']!r}")
-        return f"Added to {d['name']} ✓"
+        return f"Added to {d['name']}"
 
     def skip_proposal(self, proposal_id: int, user_id: int) -> str:
         p = self.store.proposal(proposal_id)

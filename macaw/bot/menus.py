@@ -56,9 +56,9 @@ def deck_view(store: Store, deck_id: int) -> tuple[str, Kb]:
     )
     return text, _kb(
         [
-            [("📋 Cards", f"m:cards:{deck_id}:0"), ("📊 Limits", f"m:lim:{deck_id}")],
-            [("🧩 Template", f"m:tmpl:{deck_id}"), ("✏️ Rename", f"m:ren:{deck_id}")],
-            [("🗑 Delete deck", f"m:del:{deck_id}")],
+            [("Cards", f"m:cards:{deck_id}:0"), ("Limits", f"m:lim:{deck_id}")],
+            [("Template", f"m:tmpl:{deck_id}"), ("Rename", f"m:ren:{deck_id}")],
+            [("Delete deck", f"m:del:{deck_id}")],
             [("« Decks", "m:list")],
         ]
     )
@@ -107,7 +107,7 @@ def note_view(store: Store, note_id: int, page: int) -> tuple[str, Kb]:
     lines.append("\nTo change this card, tell me in chat.")
     return "\n".join(lines), _kb(
         [
-            [("🗑 Delete", f"m:ndel:{note_id}:{page}")],
+            [("Delete", f"m:ndel:{note_id}:{page}")],
             [("« Back", f"m:cards:{d['id']}:{page}")],
         ]
     )

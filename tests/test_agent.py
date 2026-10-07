@@ -204,3 +204,11 @@ def test_daily_backup_once(store, tmp_path):
     assert store.backup(tmp_path) is not None
     assert store.backup(tmp_path) is None
     assert len(list(tmp_path.glob("macaw-*.sqlite3"))) == 1
+
+
+@pytest.mark.filterwarnings("ignore")
+def test_strip_emoji():
+    from macaw.agent import strip_emoji
+
+    assert strip_emoji("Nice! 🎉 You got it 👍🏽") == "Nice! You got it"
+    assert strip_emoji("Привет, 5 → 6") == "Привет, 5 → 6"
