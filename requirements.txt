@@ -1,0 +1,3 @@
+aiogram>=3.31,<4
+fsrs>=6.3,<7
+claude-agent-sdk>=0.2.164,<0.3
