@@ -257,7 +257,8 @@ class Agent:
                 )
         else:
             lines.append("Decks: none yet. Suggest creating one.")
-        lines.append(f"Deck types available: {', '.join(f'{k} ({v['hint']})' for k, v in DECK_TYPES.items())}.")
+        types = ", ".join(f"{k} ({v['hint']})" for k, v in DECK_TYPES.items())
+        lines.append(f"Deck types available: {types}.")
 
         active = st["active_card_id"]
         if active and self.store.card(active):
