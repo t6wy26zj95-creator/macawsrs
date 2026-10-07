@@ -562,6 +562,14 @@ class Agent:
                 return "A card is already active; ask it:\n" + self._card_brief(
                     dict(store.card(st["active_card_id"])), True
                 )
+            nxt = parse(st["next_ask_at"])
+            if nxt and nxt > turn.now and not args.get("user_asked_now"):
+                local = nxt.astimezone(srs.tz_of(turn.user)).strftime("%H:%M")
+                return (
+                    f"Not opened: the next card is scheduled for {local} and the code will ask it then. "
+                    "Only if the user clearly asked to review right now, call next_card again with "
+                    "user_asked_now=true. Otherwise tell them it comes at " + local + "."
+                )
             store.update_state(
                 uid, session_count=0, burst=max(0, want - turn.user["cards_per_session"])
             )
@@ -701,8 +709,10 @@ class Agent:
             ),
             ToolSpec(
                 "next_card",
-                "The user wants to review now. Opens the next due card (count = how many in a row they want).",
-                _jsonschema({"count": INT}, []),
+                "The user explicitly asked to review now. Opens the next due card (count = how many in a row "
+                "they want). If a card is scheduled for later, set user_asked_now=true only when they "
+                "really asked for one now, not 'when the timer is up'.",
+                _jsonschema({"count": INT, "user_asked_now": {"type": "boolean"}}, []),
                 next_card,
             ),
             ToolSpec(

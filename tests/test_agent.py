@@ -333,3 +333,26 @@ async def test_context_shows_when_the_next_card_comes(agent, llm, store):
     llm.script.append(lambda p, t: _ret("ok"))
     await agent.on_user_message(UID, "when is the next one?", NOW)
     assert "TIMER: the code brings up the next card at about 12:40." in llm.prompts[-1]
+
+
+async def test_next_card_waits_for_the_timer_unless_user_asked_now(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    store.update_state(UID, next_ask_at="2026-10-07T10:40:00+00:00")
+
+    async def eager(prompt, t):
+        out = await t["next_card"]({})
+        assert out.startswith("Not opened") and "12:40" in out
+        return "It comes at 12:40."
+
+    llm.script.append(eager)
+    await agent.on_user_message(UID, "whenever the timer is up, ask me", NOW)
+    assert store.state(UID)["active_card_id"] is None
+
+    async def now(prompt, t):
+        out = await t["next_card"]({"user_asked_now": True})
+        assert "Ask this card now" in out
+        return "What does ubiquitous mean?"
+
+    llm.script.append(now)
+    await agent.on_user_message(UID, "give me a card right now", NOW)
+    assert store.state(UID)["active_card_id"]
