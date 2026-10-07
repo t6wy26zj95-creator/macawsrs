@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS proposals (
     user_id     INTEGER NOT NULL,
     deck_id     INTEGER NOT NULL REFERENCES decks(id) ON DELETE CASCADE,
     fields      TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'pending',       -- pending, added, skipped
+    status      TEXT NOT NULL DEFAULT 'pending',       -- pending, added, skipped, replaced
     message_id  INTEGER,
     note_id     INTEGER,
     created_at  TEXT NOT NULL
@@ -417,6 +417,9 @@ class Store:
 
     def proposal(self, proposal_id: int) -> sqlite3.Row | None:
         return self.q1("SELECT * FROM proposals WHERE id=?", (proposal_id,))
+
+    def pending_proposals(self, user_id: int) -> list[sqlite3.Row]:
+        return self.q("SELECT * FROM proposals WHERE user_id=? AND status='pending' ORDER BY id", (user_id,))
 
     def update_proposal(self, proposal_id: int, **fields: Any) -> None:
         if "fields" in fields and not isinstance(fields["fields"], str):
