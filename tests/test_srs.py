@@ -115,3 +115,15 @@ def test_card_in_learning_counts_as_due_today(store, user):
     later = srs.coming_back_today(store, user, now)
     assert [c["id"] for c in later] == [card["id"]]
     assert len(srs.due_today(store, user, now)) == 1
+
+
+def test_upcoming_counts_scheduled_reviews_per_day(store, user):
+    make_deck(store, 2)
+    cards = store.user_cards(UID)
+    now = at("2026-10-07 10:00")
+    for c in cards:
+        srs.grade(store, user, c["id"], 4, "claude", None, now)  # Easy: straight to review, days ahead
+    ahead = srs.upcoming(store, user, now, days=60)
+    assert sum(n for _, n in ahead) == 2
+    assert all(d >= srs.next_day_start(user, now) for d, _ in ahead)
+    assert srs.upcoming(store, user, now, days=1) == []

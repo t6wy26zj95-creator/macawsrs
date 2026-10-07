@@ -304,6 +304,12 @@ class Agent:
                 prompt, _ = card_sides(deck_fields(deck), note_fields(note["fields"]), c["ord"])
                 at = parse(c["due"]).astimezone(tz).strftime("%H:%M")
                 lines.append(f"  #{c['id']}: {prompt} (at {at})")
+        ahead = srs.upcoming(self.store, u, now)
+        if ahead:
+            parts = ", ".join(f"{d.astimezone(tz):%a %d %b} {n}" for d, n in ahead)
+            lines.append(f"Reviews already scheduled for the next days (not counting new cards): {parts}.")
+        else:
+            lines.append("Reviews already scheduled for the next 7 days: none (new cards not counted).")
         if st["editing_proposal_id"]:
             p = self.store.proposal(st["editing_proposal_id"])
             if p and p["status"] == "pending":
