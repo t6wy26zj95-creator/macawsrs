@@ -89,6 +89,15 @@ class ClaudeCodeProvider:
         except Exception as e:
             raise LLMError(str(e)) from e
 
+        if result is not None and result.usage:
+            u = result.usage
+            log.info(
+                "claude turn: %s input (+%s cached) / %s output tokens, %s tool rounds",
+                u.get("input_tokens"),
+                (u.get("cache_read_input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0),
+                u.get("output_tokens"),
+                result.num_turns,
+            )
         if result is not None and result.is_error:
             raise LLMError(f"{result.subtype}: {result.errors or result.api_error_status}")
         # The final reply is the text after the last tool round.

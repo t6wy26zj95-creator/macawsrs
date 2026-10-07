@@ -219,7 +219,7 @@ class App:
                 return
             if action == "yes":
                 self._delete_note(c.from_user.id, note["id"])
-                await c.message.edit_text("🗑 Deleted.")
+                await c.message.edit_text("Deleted.")
             else:
                 await c.message.edit_text("Kept it.")
             await c.answer()
