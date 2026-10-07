@@ -212,3 +212,15 @@ def test_strip_emoji():
 
     assert strip_emoji("Nice! 🎉 You got it 👍🏽") == "Nice! You got it"
     assert strip_emoji("Привет, 5 → 6") == "Привет, 5 → 6"
+
+
+async def test_prompt_stays_small(agent, llm, store):
+    for i in range(30):
+        store.log_message(UID, "user", f"old message {i} " + "x" * 2000)
+    llm.script.append(lambda p, t: _ret("ok"))
+    await agent.on_user_message(UID, "newest " + "y" * 900, NOW)
+    prompt = llm.prompts[-1]
+    assert "old message 13 " not in prompt  # outside the history window
+    assert "x" * 600 not in prompt  # older long messages are shortened
+    assert "y" * 900 in prompt  # the newest message is kept whole, once
+    assert prompt.count("y" * 900) == 1

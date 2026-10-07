@@ -79,6 +79,12 @@ def _jsonschema(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
     return {"type": "object", "properties": props, "required": required, "additionalProperties": False}
 
 
+# Keep each Claude turn small so long chats don't eat into the Pro usage limits:
+# only the latest messages go in, long ones are shortened, and the due list is capped.
+HISTORY_MESSAGES = 16
+MAX_MESSAGE_CHARS = 500
+DUE_LIST_LIMIT = 15
+
 STR = {"type": "string"}
 INT = {"type": "integer"}
 
@@ -98,7 +104,7 @@ class Agent:
         turn = self._turn(user_id, now)
         # The user mentioning the answer of a card that is due but not being asked postpones it.
         self._postpone_leaks(turn, text, exclude=st["active_card_id"])
-        event = f"The user just wrote:\n{text}"
+        event = "The user just wrote the last message in the conversation above. Reply to it."
         if st["editing_proposal_id"]:
             event += (
                 f"\n\n(The user is editing card preview #{st['editing_proposal_id']}; "
@@ -281,7 +287,7 @@ class Agent:
                 f"Other cards due today ({len(others)}; don't reveal or discuss their answers; "
                 "if the talk turns to one of them, call postpone_card):"
             )
-            for c in others[:40]:
+            for c in others[:DUE_LIST_LIMIT]:
                 note = self.store.note(c["note_id"])
                 deck = self.store.deck(note["deck_id"])
                 prompt, _ = card_sides(deck_fields(deck), note_fields(note["fields"]), c["ord"])
@@ -293,10 +299,15 @@ class Agent:
         lines.append("</context>")
 
         convo = ["<conversation>"]
-        for m in self.store.recent_messages(uid):
+        recent = self.store.recent_messages(uid, HISTORY_MESSAGES)
+        for i, m in enumerate(recent):
             ts = parse(m["created_at"]).astimezone(tz).strftime("%H:%M")
             who = {"user": "User", "bot": "You", "note": "[system]"}[m["role"]]
-            convo.append(f"[{ts}] {who}: {m['text']}")
+            text = m["text"]
+            # The newest message stays whole; older long ones are shortened.
+            if i < len(recent) - 1 and len(text) > MAX_MESSAGE_CHARS:
+                text = text[:MAX_MESSAGE_CHARS] + " [...]"
+            convo.append(f"[{ts}] {who}: {text}")
         convo.append("</conversation>")
         return "\n".join(lines) + "\n\n" + "\n".join(convo)
 
