@@ -379,3 +379,15 @@ async def test_grade_result_and_note_give_real_times(agent, llm, store):
     note = next(a for a in actions if isinstance(a, RatingNote))
     text, _ = render.rating_note(store, note.log_id, NOW)
     assert "This card comes back in 10 min (12:10)" in text
+
+
+async def test_rating_note_shows_clock_time_across_midnight(agent, llm, store):
+    from macaw.bot import render
+    from macaw import srs
+
+    await _make_deck_with_card(agent, llm)
+    card = store.user_cards(UID)[0]
+    late = at("2026-10-07 21:56")  # 23:56 in Berlin
+    log_id = srs.grade(store, dict(store.get_user(UID)), card["id"], 3, "claude", "ok", late)
+    text, _ = render.rating_note(store, log_id, late)
+    assert "This card comes back in 10 min (00:06)" in text

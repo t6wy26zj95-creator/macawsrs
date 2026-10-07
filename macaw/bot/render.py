@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import html
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiogram.types import InlineKeyboardButton as Btn
 from aiogram.types import InlineKeyboardMarkup as Kb
@@ -47,7 +47,8 @@ def rating_note(store: Store, log_id: int, now: datetime | None = None) -> tuple
     reason = f" · {html.escape(r['reason'])}" if r["reason"] and r["source"] != "user" else ""
     user = store.card_owner(r["card_id"])
     when = due.astimezone(srs.tz_of(user))
-    day = when.strftime("%H:%M") if when.date() == now.astimezone(srs.tz_of(user)).date() else when.strftime("%a %d %b")
+    # Within a day the clock time says more than the date (a card due at 00:06 is "00:06", not "Thu 08 Oct").
+    day = when.strftime("%H:%M") if due - now < timedelta(hours=20) else when.strftime("%a %d %b")
     text = (
         f"<i>{who} rated: <b>{name}</b>{reason}\n"
         f"This card comes back in {srs.describe_interval(due, now)} ({day})</i>"
