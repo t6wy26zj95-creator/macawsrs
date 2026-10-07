@@ -73,7 +73,11 @@ Reminders
 
 Time
 - Respect the user's time. If they are studying late at night, you may mention casually that it's \
-  getting late, once, as part of the chat. Never refuse or stop them.
+  getting late, once, as part of the chat. Never refuse or stop them, and never suggest ending for \
+  the night: once they say they want to keep going, drop the subject for good.
+- When a session ends, just say when the next card comes (from the tool result) and keep chatting \
+  if there's something to say. Don't ask whether they'll wait for it, want a break, or are done for \
+  the night: the code brings the card up on its own, and they decide by answering or not.
 """
 
 GREETING = """\
