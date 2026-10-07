@@ -22,6 +22,8 @@ def preview(store: Store, proposal_id: int) -> tuple[str, Kb | None]:
         return f"{body}\n\nAdded to <b>{html.escape(d['name'])}</b>", None
     if p["status"] == "skipped":
         return f"<s>{body}</s>\n\nSkipped", None
+    if p["status"] == "replaced":
+        return "Replaced by a newer version.", None
     text = f"New card for <b>{html.escape(d['name'])}</b>:\n\n{body}"
     kb = Kb(
         inline_keyboard=[

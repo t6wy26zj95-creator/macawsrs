@@ -49,7 +49,7 @@ class Text:
 @dataclass
 class Preview:
     proposal_id: int
-    message_id: int | None = None  # set when revising an existing preview
+    replaces: tuple[int, ...] = ()  # message ids of older previews to remove from the chat
 
 
 @dataclass
@@ -441,8 +441,16 @@ class Agent:
             similar = [
                 r for r in store.search_notes(uid, values[fields[0]], d["id"], limit=5) if r["sort_key"] != key
             ]
+            # A new version of a card that is still waiting for Add/Skip replaces the old preview.
+            old = [
+                p for p in store.pending_proposals(uid)
+                if p["deck_id"] == d["id"] and sort_key(fields, note_fields(p["fields"])) == key
+            ]
+            for p in old:
+                store.update_proposal(p["id"], status="replaced")
+            store.update_state(uid, editing_proposal_id=None)
             pid = store.create_proposal(uid, d["id"], values)
-            turn.actions.append(Preview(pid))
+            turn.actions.append(Preview(pid, replaces=tuple(p["message_id"] for p in old if p["message_id"])))
             msg = f"Preview #{pid} shown to the user with Add / Edit / Skip buttons."
             if similar:
                 msg += " Similar existing notes (mention if relevant): " + "; ".join(r["fields"] for r in similar)
@@ -457,8 +465,8 @@ class Agent:
             values = clean_fields(fields, {**note_fields(p["fields"]), **(args.get("fields") or {})})
             store.update_proposal(p["id"], fields=values)
             store.update_state(uid, editing_proposal_id=None)
-            turn.actions.append(Preview(p["id"], message_id=p["message_id"]))
-            return f"Preview #{p['id']} updated in place; the user can now tap Add."
+            turn.actions.append(Preview(p["id"], replaces=(p["message_id"],) if p["message_id"] else ()))
+            return f"Preview #{p['id']} updated; the old version was removed and the user can now tap Add."
 
         async def edit_card(args):
             note = store.note(int(args["note_id"]))

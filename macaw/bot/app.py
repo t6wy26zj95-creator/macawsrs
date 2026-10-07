@@ -50,14 +50,9 @@ class App:
                 for chunk in _chunks(a.text):
                     await self.bot.send_message(chat_id, chunk, parse_mode=None)
             elif isinstance(a, Preview):
+                for old in a.replaces:
+                    await self.remove_preview(chat_id, old)
                 text, kb = render.preview(self.store, a.proposal_id)
-                if a.message_id:
-                    with contextlib.suppress(TelegramBadRequest):
-                        await self.bot.edit_message_text(
-                            text=text, chat_id=chat_id, message_id=a.message_id,
-                            reply_markup=kb, parse_mode=ParseMode.HTML,
-                        )
-                        continue
                 msg = await self.bot.send_message(chat_id, text, reply_markup=kb, parse_mode=ParseMode.HTML)
                 self.store.update_proposal(a.proposal_id, message_id=msg.message_id)
             elif isinstance(a, RatingNote):
@@ -66,6 +61,15 @@ class App:
             elif isinstance(a, ConfirmDelete):
                 text, kb = render.confirm_delete(self.store, a.note_id)
                 await self.bot.send_message(chat_id, text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+    async def remove_preview(self, chat_id: int, message_id: int, note: str = "Replaced by a newer version.") -> None:
+        """Delete a card preview that is done with. Telegram only lets bots delete
+        messages for 48 hours; older ones shrink to a single line instead."""
+        try:
+            await self.bot.delete_message(chat_id, message_id)
+        except TelegramBadRequest:
+            with contextlib.suppress(TelegramBadRequest):
+                await self.bot.edit_message_text(text=note, chat_id=chat_id, message_id=message_id)
 
     @contextlib.asynccontextmanager
     async def typing(self, chat_id: int):
@@ -183,9 +187,7 @@ class App:
                 self.store.log_message(uid, "bot", f"(preview #{pid}) What should I change?")
                 return
             await c.answer(note)
-            text, kb = render.preview(self.store, pid)
-            with contextlib.suppress(TelegramBadRequest):
-                await c.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            await self.remove_preview(c.message.chat.id, c.message.message_id, note)
 
         @r.callback_query(F.data.startswith("r:"))
         async def rating_cb(c: CallbackQuery):

@@ -161,6 +161,7 @@ async def _ret(text):
 class FakeBot:
     def __init__(self):
         self.sent = []
+        self.deleted = []
 
     async def send_message(self, chat_id, text, **kw):
         self.sent.append(text)
@@ -172,6 +173,9 @@ class FakeBot:
 
     async def send_chat_action(self, *a, **kw):
         pass
+
+    async def delete_message(self, chat_id, message_id):
+        self.deleted.append(message_id)
 
 
 def _app(store, agent):
@@ -243,3 +247,50 @@ async def test_context_lists_cards_coming_back_later(agent, llm, store):
     prompt = llm.prompts[-1]
     assert "Coming back later today (1" in prompt
     assert "1 due today" in prompt
+
+
+async def test_new_version_of_a_card_replaces_the_old_preview(agent, llm, store):
+    app = _app(store, agent)
+
+    async def first(prompt, t):
+        await t["create_deck"]({"name": "English", "deck_type": "vocabulary"})
+        await t["propose_card"]({"deck": "English", "fields": {"word": "to pound down", "meaning": "to move heavily"}})
+        return "Here it is."
+
+    llm.script.append(first)
+    await app.send_actions(UID, await agent.on_user_message(UID, "add pound down", NOW))
+    old = store.pending_proposals(UID)[0]
+
+    async def again(prompt, t):
+        await t["propose_card"]({"deck": "English", "fields": {"word": "to pound down", "meaning": "to strike hard",
+                                                              "example": "Rain pounded down on the roof."}})
+        return "New example."
+
+    llm.script.append(again)
+    await app.send_actions(UID, await agent.on_user_message(UID, "new example please", NOW))
+    assert store.proposal(old["id"])["status"] == "replaced"
+    assert app.bot.deleted == [old["message_id"]]
+    pending = store.pending_proposals(UID)
+    assert len(pending) == 1 and pending[0]["message_id"] != old["message_id"]
+
+
+async def test_revised_preview_is_resent_at_the_bottom(agent, llm, store):
+    app = _app(store, agent)
+
+    async def first(prompt, t):
+        await t["create_deck"]({"name": "English", "deck_type": "vocabulary"})
+        await t["propose_card"]({"deck": "English", "fields": {"word": "ubiquitous", "meaning": "everywhere"}})
+        return "Here it is."
+
+    llm.script.append(first)
+    await app.send_actions(UID, await agent.on_user_message(UID, "add ubiquitous", NOW))
+    p = store.pending_proposals(UID)[0]
+
+    async def revise(prompt, t):
+        await t["revise_proposal"]({"proposal_id": p["id"], "fields": {"example": "Phones are ubiquitous."}})
+        return "Updated."
+
+    llm.script.append(revise)
+    await app.send_actions(UID, await agent.on_user_message(UID, "add an example", NOW))
+    assert app.bot.deleted == [p["message_id"]]
+    assert store.proposal(p["id"])["message_id"] != p["message_id"]
