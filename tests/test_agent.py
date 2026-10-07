@@ -356,3 +356,26 @@ async def test_next_card_waits_for_the_timer_unless_user_asked_now(agent, llm, s
     llm.script.append(now)
     await agent.on_user_message(UID, "give me a card right now", NOW)
     assert store.state(UID)["active_card_id"]
+
+
+async def test_grade_result_and_note_give_real_times(agent, llm, store):
+    from macaw.bot import render
+
+    await _make_deck_with_card(agent, llm)
+    await _make_deck_with_card(agent, llm, "serendipity", "happy accident")
+    llm.script.append(lambda p, t: _ret("What does ubiquitous mean?"))
+    await agent.ask_next(UID, NOW)
+    card_id = store.state(UID)["active_card_id"]
+    out = {}
+
+    async def grade(prompt, t):
+        out["r"] = await t["grade_card"]({"card_id": card_id, "rating": "Good", "reason": "spot on"})
+        return "Yes!"
+
+    llm.script.append(grade)
+    actions = await agent.on_user_message(UID, "everywhere", NOW)
+    assert "This card itself comes back in 10 min" in out["r"]
+    assert "the code brings up the next one at about" in out["r"]
+    note = next(a for a in actions if isinstance(a, RatingNote))
+    text, _ = render.rating_note(store, note.log_id, NOW)
+    assert "This card comes back in 10 min (12:10)" in text

@@ -525,6 +525,12 @@ class Agent:
             if rating is None:
                 raise ValueError("rating must be Again, Hard, Good or Easy")
             log_id = srs.grade(store, turn.user, card_id, rating, "claude", args.get("reason"), turn.now)
+            tz = srs.tz_of(turn.user)
+            due = parse(store.card(card_id)["due"])
+            back = (
+                f"This card itself comes back in {srs.describe_interval(due, turn.now)} "
+                f"({due.astimezone(tz):%a %d %b %H:%M}); the grade note shows this, don't restate a different time."
+            )
             turn.graded.add(card_id)
             turn.actions.append(RatingNote(log_id))
             store.log_message(uid, "note", f"card #{card_id} graded {srs.RATING_NAMES[rating]}")
@@ -536,17 +542,19 @@ class Agent:
                 if nxt is not None:
                     turn.continued = True
                     return (
-                        f"Graded {srs.RATING_NAMES[rating]}. Continue the session: ask this next card now, "
+                        f"Graded {srs.RATING_NAMES[rating]}. {back} Continue the session: ask this next card now, "
                         f"in the same message, without revealing its answer:\n" + self._card_brief(nxt, True)
                     )
             gap = self._end_session(turn)
             left = len(srs.due_today(store, turn.user, turn.now))
             if left:
+                at = (turn.now + gap).astimezone(tz).strftime("%H:%M")
                 return (
-                    f"Graded {srs.RATING_NAMES[rating]}. Session done: do NOT ask another card now. "
-                    f"{left} cards left today; the next one comes up in about {srs.describe_interval(turn.now + gap, turn.now)}."
+                    f"Graded {srs.RATING_NAMES[rating]}. {back} Session done: do NOT ask another card now. "
+                    f"{left} cards left today; the code brings up the next one at about {at} "
+                    f"(in {srs.describe_interval(turn.now + gap, turn.now)}). Tell the user that time."
                 )
-            return f"Graded {srs.RATING_NAMES[rating]}. That was the last card due for now. Do not ask another."
+            return f"Graded {srs.RATING_NAMES[rating]}. {back} That was the last card due for now. Do not ask another."
 
         async def postpone_card(args):
             card_id = int(args["card_id"])
@@ -695,7 +703,11 @@ class Agent:
                     {
                         "card_id": INT,
                         "rating": {"type": "string", "enum": ["Again", "Hard", "Good", "Easy"]},
-                        "reason": {"type": "string", "description": "One short line shown to the user"},
+                        "reason": {
+                            "type": "string",
+                            "description": "One short line shown to the user: why this grade. Never mention "
+                            "when the card comes back; the code adds the real time.",
+                        },
                     },
                     ["card_id", "rating", "reason"],
                 ),

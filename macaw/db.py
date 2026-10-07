@@ -418,6 +418,13 @@ class Store:
     def proposal(self, proposal_id: int) -> sqlite3.Row | None:
         return self.q1("SELECT * FROM proposals WHERE id=?", (proposal_id,))
 
+    def card_owner(self, card_id: int) -> sqlite3.Row:
+        return self.q1(
+            "SELECT u.* FROM cards c JOIN notes n ON n.id=c.note_id JOIN decks d ON d.id=n.deck_id "
+            "JOIN users u ON u.id=d.user_id WHERE c.id=?",
+            (card_id,),
+        )
+
     def pending_proposals(self, user_id: int) -> list[sqlite3.Row]:
         return self.q("SELECT * FROM proposals WHERE user_id=? AND status='pending' ORDER BY id", (user_id,))
 
