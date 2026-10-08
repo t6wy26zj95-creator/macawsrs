@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from datetime import timedelta
 
 import pytest
@@ -341,8 +343,9 @@ async def test_next_card_waits_for_the_timer_unless_user_asked_now(agent, llm, s
 
     async def eager(prompt, t):
         out = await t["next_card"]({})
-        assert out.startswith("Not opened") and "12:40" in out
-        return "It comes at 12:40."
+        # The user didn't ask about timing, so no clock time reaches the model.
+        assert out.startswith("Not opened") and "12:40" not in out
+        return "It comes later."
 
     llm.script.append(eager)
     await agent.on_user_message(UID, "whenever the timer is up, ask me", NOW)
@@ -374,8 +377,24 @@ async def test_grade_result_keeps_timing_quiet_and_note_has_no_time(agent, llm, 
 
     llm.script.append(grade)
     actions = await agent.on_user_message(UID, "everywhere", NOW)
-    assert "Only if the user asks: this card comes back today at 12:10" in out["r"]
-    assert "Don't mention timing unless the user asks" in out["r"]
+    assert "comes back" not in out["r"] and not re.search(r"\d{1,2}:\d{2}", out["r"])
     note = next(a for a in actions if isinstance(a, RatingNote))
     text, _ = render.rating_note(store, note.log_id, NOW)
     assert text == "<i>I rated: <b>Good</b> · spot on</i>"
+
+
+async def test_grade_result_gives_times_when_the_user_asked(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    await _make_deck_with_card(agent, llm, "serendipity", "happy accident")
+    llm.script.append(lambda p, t: _ret("What does ubiquitous mean?"))
+    await agent.ask_next(UID, NOW)
+    card_id = store.state(UID)["active_card_id"]
+    out = {}
+
+    async def grade(prompt, t):
+        out["r"] = await t["grade_card"]({"card_id": card_id, "rating": "Good"})
+        return "Yes!"
+
+    llm.script.append(grade)
+    await agent.on_user_message(UID, "everywhere. when does it come back?", NOW)
+    assert "this card comes back today at 12:10" in out["r"]

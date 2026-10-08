@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -277,24 +278,15 @@ async def test_mentioning_a_word_without_asking_does_not_open_it(store):
     assert not store.state(UID)["active_card_id"]
 
 
-def test_drop_time_mentions():
-    from macaw.agent import drop_time_mentions
-
-    text = "You got it. Later today, around 18:40, I'll bring up another word. How's your day?"
-    assert drop_time_mentions(text) == "You got it. How's your day?"
-    assert drop_time_mentions("Next one in 10 minutes. Nice!") == "Nice!"
-    assert drop_time_mentions("Spot on!") == "Spot on!"
-    assert drop_time_mentions("Around 18:40.") == "Around 18:40."  # nothing else left: keep
-
-
-async def test_unasked_times_are_dropped_but_asked_ones_kept(store):
+async def test_times_reach_the_model_only_when_asked(store):
     from macaw.agent import Agent
+    from .test_agent import _make_deck_with_card
 
     llm = FakeLLM()
     agent = Agent(store, llm)
-    llm.script.append(lambda p, t: _ret("Nice chat. Next word around 18:40."))
-    assert (await agent.on_user_message(UID, "I had a good day", NOW))[0] == Text("Nice chat.")
-    llm.script.append(lambda p, t: _ret("Sure. Next word around 18:40."))
-    assert (await agent.on_user_message(UID, "when is the next card?", NOW))[0] == Text(
-        "Sure. Next word around 18:40."
-    )
+    await _make_deck_with_card(agent, llm)
+    clock = re.compile(r"TIMER:[^\n]*\d{1,2}:\d{2}")
+    await agent.on_user_message(UID, "I had a good day", NOW)
+    assert not clock.search(llm.prompts[-1])
+    await agent.on_user_message(UID, "when is the next card?", NOW)
+    assert clock.search(llm.prompts[-1])

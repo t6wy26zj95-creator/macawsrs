@@ -39,23 +39,12 @@ def strip_emoji(text: str) -> str:
 
 
 # Nick's rule: the bot never brings up when cards come back unless asked. Some
-# models ignore the prompt, so sentences naming a time are dropped in code.
-TIME_MENTION = re.compile(
-    r"\b\d{1,2}[:.]\d{2}\b|\bin (?:about |around )?(?:\d+|a few|an?|one|two|ten|half an?) "
-    r"(?:minutes?|mins?|hours?)\b",
-    re.I,
-)
+# models repeat any time they can see, so clock times are only put in front of
+# the model when the user's message asks about timing.
 TIME_QUESTION = re.compile(
     r"\b(?:when|what time|how long|how soon|until|next (?:card|one|word|review)|come back|schedule[ds]?)\b",
     re.I,
 )
-
-
-def drop_time_mentions(text: str) -> str:
-    """Remove sentences that state a time. Keeps the text if nothing else would remain."""
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    kept = [s for s in sentences if not TIME_MENTION.search(s)]
-    return " ".join(kept).strip() if kept and len(kept) < len(sentences) else text
 
 
 # ---------- actions the Telegram layer performs after a turn ----------
@@ -93,6 +82,7 @@ class Turn:
     graded: set[int] = field(default_factory=set)
     postponed: set[int] = field(default_factory=set)
     continued: bool = False  # a grade was followed by the next card in the same turn
+    show_times: bool = False  # clock times are shown to the model only when the user asked
 
 
 def _jsonschema(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -125,6 +115,7 @@ class Agent:
         self.store.log_message(user_id, "user", text)
         self.store.update_state(user_id, last_user_at=iso(now), reminders_streak=0)
         turn = self._turn(user_id, now)
+        turn.show_times = bool(TIME_QUESTION.search(text))
         self._adopt_asked_card(turn, last_bot)
         st = self.store.state(user_id)
         # The user mentioning the answer of a card that is due but not being asked postpones it.
@@ -143,9 +134,7 @@ class Agent:
                 f"\n\n(The user is editing card preview #{st['editing_proposal_id']}; "
                 "if this message describes changes, call revise_proposal.)"
             )
-        return await self._run(
-            turn, event, must_use_tool=answering, time_asked=bool(TIME_QUESTION.search(text))
-        )
+        return await self._run(turn, event, must_use_tool=answering)
 
     async def ask_next(self, user_id: int, now: datetime | None = None) -> list[Action]:
         """Called by the timer when it's time for the next card."""
@@ -186,9 +175,7 @@ class Agent:
         user = dict(self.store.get_user(user_id))
         return Turn(user=user, now=now)
 
-    async def _run(
-        self, turn: Turn, event: str, must_use_tool: bool = False, time_asked: bool = False
-    ) -> list[Action]:
+    async def _run(self, turn: Turn, event: str, must_use_tool: bool = False) -> list[Action]:
         uid = turn.user["id"]
         prompt = self._context(turn) + "\n\n<event>\n" + event + "\n</event>"
         llm = self.models.for_user(turn.user) if self.models else self.llm
@@ -207,8 +194,6 @@ class Agent:
                 )
             )
         reply = strip_emoji(await llm.run(SYSTEM_PROMPT, prompt, tools, must_use_tool=must_use_tool))
-        if not time_asked:
-            reply = drop_time_mentions(reply)
         if reply:
             self._postpone_leaks(turn, reply, exclude=None)
             # The reply normally comes first. When it already asks the next card,
@@ -291,6 +276,13 @@ class Agent:
         """What the code will do next on its own, so Claude never has to guess or promise."""
         u, now = turn.user, turn.now
         fmt = lambda t: t.astimezone(srs.tz_of(u)).strftime("%H:%M")  # noqa: E731
+        if not turn.show_times:
+            # No clock times unless the user asked, so the model has none to volunteer.
+            if active:
+                return "TIMER: waiting for the answer; the code sends reminders on its own."
+            if not queue:
+                return "TIMER: nothing to ask right now; the code brings up cards on its own when due."
+            return "TIMER: the code brings up the next card on its own later."
         if active:
             asked = parse(st["asked_at"])
             if not asked or st["reminders_today"] >= u["max_reminders"]:
@@ -406,8 +398,11 @@ class Agent:
                 note = self.store.note(c["note_id"])
                 deck = self.store.deck(note["deck_id"])
                 prompt, _ = card_sides(deck_fields(deck), note_fields(note["fields"]), c["ord"])
-                at = parse(c["due"]).astimezone(tz).strftime("%H:%M")
-                lines.append(f"  #{c['id']}: {prompt} (at {at})")
+                if turn.show_times:
+                    at = parse(c["due"]).astimezone(tz).strftime("%H:%M")
+                    lines.append(f"  #{c['id']}: {prompt} (at {at})")
+                else:
+                    lines.append(f"  #{c['id']}: {prompt}")
         ahead = srs.upcoming(self.store, u, now)
         if ahead:
             parts = ", ".join(f"{d.astimezone(tz):%a %d %b} {n}" for d, n in ahead)
@@ -607,7 +602,9 @@ class Agent:
             log_id = srs.grade(store, turn.user, card_id, rating, "claude", args.get("reason"), turn.now)
             tz = srs.tz_of(turn.user)
             back = (
-                f"(Only if the user asks: this card comes back {srs.comes_back(turn.user, store.card(card_id), turn.now)}.)"
+                f"(The user asked about timing: this card comes back {srs.comes_back(turn.user, store.card(card_id), turn.now)}.)"
+                if turn.show_times
+                else ""
             )
             turn.graded.add(card_id)
             turn.actions.append(RatingNote(log_id))
@@ -626,11 +623,13 @@ class Agent:
             gap = self._end_session(turn)
             left = len(srs.due_today(store, turn.user, turn.now))
             if left:
-                at = (turn.now + gap).astimezone(tz).strftime("%H:%M")
+                when = ""
+                if turn.show_times:
+                    at = (turn.now + gap).astimezone(tz).strftime("%H:%M")
+                    when = f" at about {at} (the user asked about timing; give that exact time)"
                 return (
                     f"Graded {srs.RATING_NAMES[rating]}. {back} Session done: do NOT ask another card now. "
-                    f"{left} cards left today; the code brings up the next one at about {at}. "
-                    "Don't mention timing unless the user asks; if they do, give that exact time."
+                    f"{left} cards left today; the code brings up the next one on its own{when}."
                 )
             return f"Graded {srs.RATING_NAMES[rating]}. {back} That was the last card due for now. Do not ask another."
 
@@ -651,10 +650,11 @@ class Agent:
             nxt = parse(st["next_ask_at"])
             if nxt and nxt > turn.now and not args.get("user_asked_now"):
                 local = nxt.astimezone(srs.tz_of(turn.user)).strftime("%H:%M")
+                when = f"at {local}" if turn.show_times else "later"
                 return (
-                    f"Not opened: the next card is scheduled for {local} and the code will ask it then. "
+                    f"Not opened: the next card is scheduled for later and the code will ask it then. "
                     "Only if the user clearly asked to review right now, call next_card again with "
-                    "user_asked_now=true. Otherwise tell them it comes at " + local + "."
+                    f"user_asked_now=true. Otherwise tell them it comes {when}."
                 )
             store.update_state(
                 uid, session_count=0, burst=max(0, want - turn.user["cards_per_session"])
