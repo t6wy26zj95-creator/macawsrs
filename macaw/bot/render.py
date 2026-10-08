@@ -36,7 +36,12 @@ def preview(store: Store, proposal_id: int) -> tuple[str, Kb | None]:
     return text, kb
 
 
-def rating_note(store: Store, log_id: int, now: datetime | None = None) -> tuple[str, Kb]:
+NEXT = "n:"  # callback data of the Next card button
+
+
+def rating_note(
+    store: Store, log_id: int, now: datetime | None = None, offer_next: bool = False
+) -> tuple[str, Kb]:
     now = now or datetime.now(timezone.utc)
     r = store.review(log_id)
     name = srs.RATING_NAMES[r["rating"]]
@@ -47,7 +52,14 @@ def rating_note(store: Store, log_id: int, now: datetime | None = None) -> tuple
     for value, label in srs.RATING_NAMES.items():
         mark = "• " if value == r["rating"] else ""
         row.append(Btn(text=f"{mark}{label}", callback_data=f"r:{log_id}:{value}"))
-    return text, Kb(inline_keyboard=[row])
+    rows = [row]
+    if offer_next:
+        rows.append([Btn(text="Next card", callback_data=NEXT)])
+    return text, Kb(inline_keyboard=rows)
+
+
+def has_next(kb: Kb | None) -> bool:
+    return bool(kb) and any(b.callback_data == NEXT for row in kb.inline_keyboard for b in row)
 
 
 def confirm_delete(store: Store, note_id: int) -> tuple[str, Kb]:
