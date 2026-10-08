@@ -139,3 +139,50 @@ def test_prune_keeps_each_users_history(store):
     store.prune_messages(keep=3)
     assert [r["text"] for r in store.recent_messages(GUEST)] == ["only one"]
     assert [r["text"] for r in store.recent_messages(UID)] == ["b2", "b3", "b4"]
+
+
+async def test_rate_limit_moves_to_next_model_then_waits(monkeypatch):
+    from macaw.llm import openai_compat as oc
+
+    seen = []
+    limited = {"a": 2, "b": 1}  # how many more times each model answers 429
+
+    async def fake_post(self, session, body):
+        seen.append(body["model"])
+        if limited[body["model"]] > 0:
+            limited[body["model"]] -= 1
+            raise oc.RateLimited(0.01)
+        return {"choices": [{"message": {"content": "hi from " + body["model"]}}]}
+
+    async def no_sleep(s):
+        pass
+
+    monkeypatch.setattr(OpenAICompatProvider, "_post", fake_post)
+    monkeypatch.setattr(oc.asyncio, "sleep", no_sleep)
+    # The clock jumps forward once, as if the provider had slept.
+    times = iter([1000.0] * 5)
+    monkeypatch.setattr(oc.time, "monotonic", lambda: next(times, 2000.0))
+    p = OpenAICompatProvider("https://x.test/v1", "k", ["a", "b"])
+
+    # a and b both limited: the provider waits, then a is limited again, b answers.
+    assert await p.run("s", "p", []) == "hi from b"
+    assert seen == ["a", "b", "a", "b"]
+
+
+async def test_gives_up_when_wait_is_too_long(monkeypatch):
+    from macaw.llm import openai_compat as oc
+
+    async def fake_post(self, session, body):
+        raise oc.RateLimited(500)
+
+    monkeypatch.setattr(OpenAICompatProvider, "_post", fake_post)
+    p = OpenAICompatProvider("https://x.test/v1", "k", ["a", "b"])
+    with pytest.raises(LLMError):
+        await p.run("s", "p", [])
+
+
+def test_gpt_oss_gets_low_reasoning_effort():
+    from macaw.llm.openai_compat import _body_for
+
+    assert _body_for("openai/gpt-oss-20b", {})["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in _body_for("qwen/qwen3.8-27b", {})

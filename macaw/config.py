@@ -21,6 +21,8 @@ class Config:
     free_api_key: str | None = None
     free_base_url: str = "https://api.groq.com/openai/v1"
     free_model: str = "openai/gpt-oss-120b"
+    # Tried in order when the one before is at its rate limit.
+    free_fallback_models: tuple[str, ...] = ("openai/gpt-oss-20b",)
 
     @property
     def allowed_ids(self) -> frozenset[int]:
@@ -56,4 +58,9 @@ def load_config() -> Config:
         free_api_key=os.environ.get("FREE_LLM_API_KEY", "").strip() or None,
         free_base_url=os.environ.get("FREE_LLM_BASE_URL") or "https://api.groq.com/openai/v1",
         free_model=os.environ.get("FREE_LLM_MODEL") or "openai/gpt-oss-120b",
+        free_fallback_models=tuple(
+            m.strip()
+            for m in os.environ.get("FREE_LLM_FALLBACK_MODELS", "openai/gpt-oss-20b").split(",")
+            if m.strip()
+        ),
     )
