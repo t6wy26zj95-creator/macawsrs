@@ -38,6 +38,26 @@ def strip_emoji(text: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", EMOJI.sub("", text)).strip()
 
 
+# Nick's rule: the bot never brings up when cards come back unless asked. Some
+# models ignore the prompt, so sentences naming a time are dropped in code.
+TIME_MENTION = re.compile(
+    r"\b\d{1,2}[:.]\d{2}\b|\bin (?:about |around )?(?:\d+|a few|an?|one|two|ten|half an?) "
+    r"(?:minutes?|mins?|hours?)\b",
+    re.I,
+)
+TIME_QUESTION = re.compile(
+    r"\b(?:when|what time|how long|how soon|until|next (?:card|one|word|review)|come back|schedule[ds]?)\b",
+    re.I,
+)
+
+
+def drop_time_mentions(text: str) -> str:
+    """Remove sentences that state a time. Keeps the text if nothing else would remain."""
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    kept = [s for s in sentences if not TIME_MENTION.search(s)]
+    return " ".join(kept).strip() if kept and len(kept) < len(sentences) else text
+
+
 # ---------- actions the Telegram layer performs after a turn ----------
 
 
@@ -123,7 +143,9 @@ class Agent:
                 f"\n\n(The user is editing card preview #{st['editing_proposal_id']}; "
                 "if this message describes changes, call revise_proposal.)"
             )
-        return await self._run(turn, event, must_use_tool=answering)
+        return await self._run(
+            turn, event, must_use_tool=answering, time_asked=bool(TIME_QUESTION.search(text))
+        )
 
     async def ask_next(self, user_id: int, now: datetime | None = None) -> list[Action]:
         """Called by the timer when it's time for the next card."""
@@ -164,7 +186,9 @@ class Agent:
         user = dict(self.store.get_user(user_id))
         return Turn(user=user, now=now)
 
-    async def _run(self, turn: Turn, event: str, must_use_tool: bool = False) -> list[Action]:
+    async def _run(
+        self, turn: Turn, event: str, must_use_tool: bool = False, time_asked: bool = False
+    ) -> list[Action]:
         uid = turn.user["id"]
         prompt = self._context(turn) + "\n\n<event>\n" + event + "\n</event>"
         llm = self.models.for_user(turn.user) if self.models else self.llm
@@ -183,6 +207,8 @@ class Agent:
                 )
             )
         reply = strip_emoji(await llm.run(SYSTEM_PROMPT, prompt, tools, must_use_tool=must_use_tool))
+        if not time_asked:
+            reply = drop_time_mentions(reply)
         if reply:
             self._postpone_leaks(turn, reply, exclude=None)
             # The reply normally comes first. When it already asks the next card,
