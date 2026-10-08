@@ -99,10 +99,14 @@ class Agent:
 
     async def on_user_message(self, user_id: int, text: str, now: datetime | None = None) -> list[Action]:
         now = now or datetime.now(timezone.utc)
+        last_bot = next(
+            (m["text"] for m in reversed(self.store.recent_messages(user_id, 6)) if m["role"] == "bot"), ""
+        )
         self.store.log_message(user_id, "user", text)
-        st = self.store.state(user_id)
         self.store.update_state(user_id, last_user_at=iso(now), reminders_streak=0)
         turn = self._turn(user_id, now)
+        self._adopt_asked_card(turn, last_bot)
+        st = self.store.state(user_id)
         # The user mentioning the answer of a card that is due but not being asked postpones it.
         self._postpone_leaks(turn, text, exclude=st["active_card_id"])
         event = "The user just wrote the last message in the conversation above. Reply to it."
@@ -188,6 +192,30 @@ class Agent:
             self.store.log_message(uid, "bot", reply)
             self.store.update_state(uid, last_bot_at=iso(turn.now))
         return turn.actions
+
+    def _adopt_asked_card(self, turn: Turn, last_bot: str) -> None:
+        """If the bot's last message quizzed a due card that isn't the active one
+        (a weaker model may pick cards itself), make that card active, so the
+        user's answer gets graded instead of postponed as a leak."""
+        uid = turn.user["id"]
+        st = self.store.state(uid)
+        if "?" not in last_bot:  # only a question counts as asking a card
+            return
+        active = st["active_card_id"]
+        if active and self.store.card(active) and self._prompt_in(active, last_bot):
+            return
+        for c in srs.due_queue(self.store, turn.user, turn.now):
+            if c["id"] != active and self._prompt_in(c["id"], last_bot):
+                self.store.update_state(uid, active_card_id=c["id"], asked_at=iso(turn.now))
+                log.info("adopted card %s that the model asked on its own", c["id"])
+                return
+
+    def _prompt_in(self, card_id: int, text: str) -> bool:
+        card = self.store.card(card_id)
+        note = self.store.note(card["note_id"])
+        deck = self.store.deck(note["deck_id"])
+        prompt, _ = card_sides(deck_fields(deck), note_fields(note["fields"]), card["ord"])
+        return contains_answer(text, prompt)
 
     def _postpone_leaks(self, turn: Turn, text: str, exclude: int | None) -> None:
         """Postpone due cards whose answer appears in the text.

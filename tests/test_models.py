@@ -238,3 +238,40 @@ async def test_openai_compat_requires_tool_only_on_first_round(monkeypatch):
 
 async def _ret(text):
     return text
+
+
+async def test_card_the_model_asked_itself_is_graded_not_postponed(store):
+    from macaw.agent import Agent
+    from .test_agent import _make_deck_with_card
+
+    llm = FakeLLM()
+    agent = Agent(store, llm)
+    await _make_deck_with_card(agent, llm)
+    assert not store.state(UID)["active_card_id"]
+    # The model quizzes the card on its own, without the timer making it active.
+    store.log_message(UID, "bot", "Quick one: what does 'ubiquitous' mean?")
+
+    seen = {}
+
+    async def grade(prompt, t):
+        cid = store.state(UID)["active_card_id"]
+        seen["cid"] = cid
+        await t["grade_card"]({"card_id": cid, "rating": "Good"})
+        return "Exactly."
+
+    llm.script.append(grade)
+    await agent.on_user_message(UID, "present everywhere", NOW)
+    assert seen["cid"] and llm.must_use_tool[-1] is True
+    assert "postponed" not in " ".join(r["text"] for r in store.recent_messages(UID, 20))
+
+
+async def test_mentioning_a_word_without_asking_does_not_open_it(store):
+    from macaw.agent import Agent
+    from .test_agent import _make_deck_with_card
+
+    llm = FakeLLM()
+    agent = Agent(store, llm)
+    await _make_deck_with_card(agent, llm)
+    store.log_message(UID, "bot", "Added ubiquitous to your deck.")
+    await agent.on_user_message(UID, "thanks", NOW)
+    assert not store.state(UID)["active_card_id"]
