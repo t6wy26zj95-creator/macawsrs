@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo, available_timezones
 from . import pacing, srs
 from .db import Store, iso, parse
 from .leak import contains_answer
+from .lookalike import find_lookalikes
 from .llm import LLMProvider, Models, ToolSpec
 from .prompts import SYSTEM_PROMPT
 from .templates import (
@@ -83,6 +84,7 @@ class Turn:
     postponed: set[int] = field(default_factory=set)
     continued: bool = False  # a grade was followed by the next card in the same turn
     show_times: bool = False  # clock times are shown to the model only when the user asked
+    lookalikes: list[dict[str, Any]] = field(default_factory=list)  # deck notes the answer resembles
 
 
 def _jsonschema(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -129,6 +131,7 @@ class Agent:
                 "If the message reveals or asks for its answer, call postpone_card. Otherwise call "
                 "not_an_answer, then just chat."
             )
+            event += self._lookalike_hint(turn, text, st["active_card_id"])
         if st["editing_proposal_id"]:
             event += (
                 f"\n\n(The user is editing card preview #{st['editing_proposal_id']}; "
@@ -196,6 +199,7 @@ class Agent:
         reply = strip_emoji(await llm.run(SYSTEM_PROMPT, prompt, tools, must_use_tool=must_use_tool))
         if reply:
             self._postpone_leaks(turn, reply, exclude=None)
+            self._postpone_named_lookalikes(turn, reply)
             # The reply normally comes first. When it already asks the next card,
             # show the grade first so it isn't read as the grade of the new question.
             pos = sum(isinstance(a, RatingNote) for a in turn.actions) if turn.continued else 0
@@ -220,6 +224,38 @@ class Agent:
                 self.store.update_state(uid, active_card_id=c["id"], asked_at=iso(turn.now))
                 log.info("adopted card %s that the model asked on its own", c["id"])
                 return
+
+    def _lookalike_hint(self, turn: Turn, text: str, active_id: int) -> str:
+        """Point the model at cards in the user's decks that their answer matches,
+        so a mix-up ("that's actually mottled") can be named instead of guessed."""
+        uid = turn.user["id"]
+        notes = [
+            {"id": n["id"], "fields": deck_fields({"fields": n["deck_fields"]}),
+             "values": note_fields(n["fields"]), "deck": n["deck_name"]}
+            for n in self.store.user_notes(uid)
+        ]
+        turn.lookalikes = find_lookalikes(text, notes, exclude_note=self.store.card(active_id)["note_id"])
+        if not turn.lookalikes:
+            return ""
+        found = "\n".join(
+            f"- \"{h['word']}\" = {h['meaning']} (deck \"{h['deck']}\")" for h in turn.lookalikes
+        )
+        return (
+            "\n\nOther cards in the user's own decks that this answer matches (found by word overlap, "
+            "may be coincidence):\n" + found + "\nIf the answer is wrong and really fits one of these, "
+            "say they likely mixed it up with that word from their deck, by name, instead of suggesting "
+            "other words."
+        )
+
+    def _postpone_named_lookalikes(self, turn: Turn, reply: str) -> None:
+        """Naming a look-alike shows its word next to its meaning, so if that card
+        is due today it is no longer a fair question; postpone it like a leak."""
+        named = {h["note_id"] for h in turn.lookalikes if contains_answer(reply, h["word"])}
+        if not named:
+            return
+        for c in srs.due_queue(self.store, turn.user, turn.now):
+            if c["note_id"] in named and c["id"] not in turn.graded and c["id"] not in turn.postponed:
+                self._postpone(turn, c["id"], "named as the word the user mixed up")
 
     def _prompt_in(self, card_id: int, text: str) -> bool:
         card = self.store.card(card_id)
@@ -263,7 +299,12 @@ class Agent:
     def _activate_next(self, turn: Turn) -> dict[str, Any] | None:
         uid = turn.user["id"]
         queue = srs.due_queue(self.store, turn.user, turn.now)
-        queue = [c for c in queue if c["id"] not in turn.postponed and c["id"] not in turn.graded]
+        # A card the user's answer just matched would be no real test right now.
+        mixed = {h["note_id"] for h in turn.lookalikes}
+        queue = [
+            c for c in queue
+            if c["id"] not in turn.postponed and c["id"] not in turn.graded and c["note_id"] not in mixed
+        ]
         if not queue:
             return None
         card = queue[0]
