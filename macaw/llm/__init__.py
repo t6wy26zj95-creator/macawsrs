@@ -21,8 +21,11 @@ class LLMError(Exception):
 
 
 class LLMProvider(Protocol):
-    async def run(self, system: str, prompt: str, tools: list[ToolSpec]) -> str:
-        """Run one turn: the model may call tools, then returns its final text."""
+    async def run(self, system: str, prompt: str, tools: list[ToolSpec], must_use_tool: bool = False) -> str:
+        """Run one turn: the model may call tools, then returns its final text.
+
+        `must_use_tool` asks the model to call at least one tool before replying.
+        Providers whose models follow the system prompt reliably may ignore it."""
         ...
 
 

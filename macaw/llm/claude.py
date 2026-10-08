@@ -53,7 +53,8 @@ class ClaudeCodeProvider:
             out.append(make(spec))
         return out
 
-    async def run(self, system: str, prompt: str, tools: list[ToolSpec]) -> str:
+    async def run(self, system: str, prompt: str, tools: list[ToolSpec], must_use_tool: bool = False) -> str:
+        # Claude grades reliably from the system prompt, so must_use_tool isn't needed.
         server = create_sdk_mcp_server(name=SERVER, tools=self._sdk_tools(tools))
         options = ClaudeAgentOptions(
             system_prompt=system,
