@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from aiogram import Bot
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, BotCommandScopeChat
 
 from .agent import Agent
 from .bot.app import App, build_dispatcher
@@ -35,14 +36,21 @@ async def main() -> None:
     app = App(config, store, agent, bot)
     dp = build_dispatcher(app)
 
-    await bot.set_my_commands(
-        [
-            BotCommand(command="decks", description="Your decks and their settings"),
-            BotCommand(command="review", description="Review a card now"),
-            BotCommand(command="settings", description="Timezone, quiet hours, reminders"),
-            BotCommand(command="model", description="Which AI model you're using"),
-        ]
-    )
+    commands = [
+        BotCommand(command="decks", description="Your decks and their settings"),
+        BotCommand(command="review", description="Review a card now"),
+        BotCommand(command="settings", description="Timezone, quiet hours, reminders"),
+        BotCommand(command="model", description="Which AI model you're using"),
+    ]
+    await bot.set_my_commands(commands)
+    owner_commands = commands + [
+        BotCommand(command="invite", description="Invite link for a friend"),
+        BotCommand(command="guests", description="Friends using the bot"),
+    ]
+    for owner in config.owner_ids:
+        # Fails if the owner hasn't opened the bot yet; the default menu still works.
+        with contextlib.suppress(Exception):
+            await bot.set_my_commands(owner_commands, scope=BotCommandScopeChat(chat_id=owner))
     ticker = asyncio.create_task(app.ticker())
     try:
         # Long polling: outbound connections only, no open ports.

@@ -108,3 +108,34 @@ async def test_openai_compat_runs_tool_rounds(monkeypatch):
 def test_config_defaults_keep_old_positional_construction():
     cfg = Config("t", frozenset({UID}), None, "UTC", "fake", None, "INFO")
     assert cfg.allowed_ids == frozenset({UID}) and cfg.free_api_key is None
+
+
+def test_invite_link_works_once_and_expires(store):
+    store.create_invite("abc", UID, at("2026-10-14 10:00"))
+    store.create_invite("old", UID, at("2026-10-01 10:00"))
+    assert store.redeem_invite("old", GUEST, "Ann", NOW) is None
+    assert store.redeem_invite("nope", GUEST, "Ann", NOW) is None
+    assert not store.is_guest(GUEST)
+    assert store.redeem_invite("abc", GUEST, "Ann", NOW) == UID
+    assert store.is_guest(GUEST)
+    assert store.redeem_invite("abc", 88, "Bob", NOW) is None  # one person only
+    assert [g["name"] for g in store.guests()] == ["Ann"]
+    assert store.remove_guest(GUEST) and not store.is_guest(GUEST)
+
+
+def test_invited_guest_gets_free_model(models, store):
+    store.create_invite("abc", UID, at("2026-10-14 10:00"))
+    store.redeem_invite("abc", GUEST, "Ann", NOW)
+    store.ensure_user(GUEST, GUEST, "UTC")
+    assert models.for_user(dict(store.get_user(GUEST))) is models.free
+
+
+def test_prune_keeps_each_users_history(store):
+    for i in range(5):
+        store.log_message(UID, "user", f"a{i}")
+    store.log_message(GUEST, "user", "only one")
+    for i in range(5):
+        store.log_message(UID, "user", f"b{i}")
+    store.prune_messages(keep=3)
+    assert [r["text"] for r in store.recent_messages(GUEST)] == ["only one"]
+    assert [r["text"] for r in store.recent_messages(UID)] == ["b2", "b3", "b4"]

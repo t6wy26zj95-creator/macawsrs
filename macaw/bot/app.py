@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, Message
 from aiogram.types import InlineKeyboardButton as Btn
 from aiogram.types import InlineKeyboardMarkup as Kb
@@ -29,6 +30,7 @@ log = logging.getLogger(__name__)
 TICK_SECONDS = 30
 LLM_BACKOFF_MIN = 15
 TG_LIMIT = 4000
+INVITE_DAYS = 7
 
 
 class App:
@@ -109,7 +111,9 @@ class App:
     # ================= handlers =================
 
     def _allowed(self, user_id: int | None) -> bool:
-        return user_id is not None and user_id in self.config.allowed_ids
+        if user_id is None:
+            return False
+        return user_id in self.config.allowed_ids or self.store.is_guest(user_id)
 
     def _model_name(self, user_id: int) -> str:
         user = self.store.get_user(user_id)
@@ -138,8 +142,12 @@ class App:
         r = self.router
 
         @r.message(CommandStart())
-        async def start(m: Message):
-            if not self._allowed(m.from_user and m.from_user.id):
+        async def start(m: Message, command: CommandObject):
+            if not m.from_user:
+                return
+            if not self._allowed(m.from_user.id) and command.args:
+                await self._redeem(m, command.args)
+            if not self._allowed(m.from_user.id):
                 await m.answer("Sorry, this is a private bot.")
                 return
             self.store.ensure_user(m.from_user.id, m.chat.id, self.config.default_timezone)
@@ -175,6 +183,27 @@ class App:
                 "To change any of these, just tell me, e.g. \"I'm in Berlin\" or \"ask me 3 cards at a time\".",
                 parse_mode=None,
             )
+
+        @r.message(Command("invite"))
+        async def invite(m: Message):
+            if not m.from_user or m.from_user.id not in self.config.owner_ids:
+                return
+            code = secrets.token_urlsafe(9)
+            self.store.create_invite(code, m.from_user.id, _now() + timedelta(days=INVITE_DAYS))
+            me = await self.bot.me()
+            await m.answer(
+                "Send this link to a friend. It works once, for one person, for the next "
+                f"{INVITE_DAYS} days. They'll get their own decks and use the free model, never Claude.\n\n"
+                f"https://t.me/{me.username}?start={code}",
+                parse_mode=None,
+            )
+
+        @r.message(Command("guests"))
+        async def guests(m: Message):
+            if not m.from_user or m.from_user.id not in self.config.owner_ids:
+                return
+            text, kb = self._guest_menu()
+            await m.answer(text, reply_markup=kb, parse_mode=None)
 
         @r.message(Command("model"))
         async def model(m: Message):
@@ -279,11 +308,48 @@ class App:
                 await c.message.edit_text(text, reply_markup=kb)
             await c.answer()
 
+        @r.callback_query(F.data.startswith("g:"))
+        async def guest_cb(c: CallbackQuery):
+            if c.from_user.id not in self.config.owner_ids:
+                await c.answer()
+                return
+            gid = int(c.data.split(":", 1)[1])
+            removed = self.store.remove_guest(gid)
+            text, kb = self._guest_menu()
+            with contextlib.suppress(TelegramBadRequest):
+                await c.message.edit_text(text, reply_markup=kb)
+            await c.answer("Removed. Their cards are kept in case you invite them again." if removed else None)
+
         @r.callback_query(F.data.startswith("m:"))
         async def menu_cb(c: CallbackQuery):
             if not self._allowed(c.from_user.id):
                 return
             await self._menu(c)
+
+    async def _redeem(self, m: Message, code: str) -> None:
+        name = m.from_user.full_name
+        inviter = self.store.redeem_invite(code, m.from_user.id, name)
+        if inviter is None:
+            await m.answer("This invite link has already been used or has expired. Ask for a new one.")
+            return
+        log.info("guest %s joined by invite", m.from_user.id)
+        owner = self.store.get_user(inviter)
+        if owner:
+            with contextlib.suppress(Exception):  # a failed heads-up must not block the guest
+                await self.bot.send_message(owner["chat_id"], f"{name} joined with your invite link.")
+
+    def _guest_menu(self) -> tuple[str, Kb | None]:
+        rows = self.store.guests()
+        if not rows:
+            return "No friends have joined yet. Send /invite to get a link.", None
+        names = [g["name"] or str(g["user_id"]) for g in rows]
+        text = "Friends using the bot (free model):\n" + "\n".join(f"• {n}" for n in names)
+        kb = Kb(
+            inline_keyboard=[
+                [Btn(text=f"Remove {n}", callback_data=f"g:{g['user_id']}")] for n, g in zip(names, rows)
+            ]
+        )
+        return text, kb
 
     async def _chat(self, m: Message, text: str) -> None:
         uid = m.from_user.id
@@ -420,7 +486,7 @@ class App:
             if self.store.backup(self.config.db_path.parent / "backups"):
                 log.info("database backup written")
         for user in self.store.all_users():
-            if user["id"] not in self.config.allowed_ids:
+            if not self._allowed(user["id"]):
                 continue
             lock = self.lock(user["id"])
             if lock.locked():
