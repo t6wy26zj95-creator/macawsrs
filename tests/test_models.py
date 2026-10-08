@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -275,3 +276,17 @@ async def test_mentioning_a_word_without_asking_does_not_open_it(store):
     store.log_message(UID, "bot", "Added ubiquitous to your deck.")
     await agent.on_user_message(UID, "thanks", NOW)
     assert not store.state(UID)["active_card_id"]
+
+
+async def test_times_reach_the_model_only_when_asked(store):
+    from macaw.agent import Agent
+    from .test_agent import _make_deck_with_card
+
+    llm = FakeLLM()
+    agent = Agent(store, llm)
+    await _make_deck_with_card(agent, llm)
+    clock = re.compile(r"TIMER:[^\n]*\d{1,2}:\d{2}")
+    await agent.on_user_message(UID, "I had a good day", NOW)
+    assert not clock.search(llm.prompts[-1])
+    await agent.on_user_message(UID, "when is the next card?", NOW)
+    assert clock.search(llm.prompts[-1])
