@@ -15,6 +15,7 @@ from fsrs import Card, Rating, Scheduler, State
 from .db import Store, iso, parse
 
 NEW = 0
+REVIEW = 2  # 1 and 3 are (re)learning steps
 RATING_NAMES = {1: "Again", 2: "Hard", 3: "Good", 4: "Easy"}
 RATING_BY_NAME = {v.lower(): k for k, v in RATING_NAMES.items()}
 

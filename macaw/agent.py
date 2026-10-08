@@ -25,6 +25,7 @@ from .templates import (
     card_sides,
     clean_fields,
     deck_fields,
+    headword,
     note_fields,
     sort_key,
 )
@@ -288,7 +289,7 @@ class Agent:
         note = self.store.note(card["note_id"])
         deck = self.store.deck(note["deck_id"])
         prompt, _ = card_sides(deck_fields(deck), note_fields(note["fields"]), card["ord"])
-        return contains_answer(text, prompt)
+        return contains_answer(text, headword(prompt)[0])
 
     def _postpone_leaks(self, turn: Turn, text: str, exclude: int | None) -> None:
         """Postpone due cards whose answer appears in the text.
@@ -395,9 +396,17 @@ class Agent:
         values = note_fields(note["fields"])
         prompt, answer = card_sides(fields, values, card["ord"])
         direction = "reverse (answer -> prompt)" if card["ord"] == 1 else "forward"
-        status = "NEW (never studied)" if card["state"] == srs.NEW else "review"
+        if card["state"] == srs.NEW:
+            status = "NEW (never studied)"
+        elif card["state"] == srs.REVIEW:
+            status = "review"
+        else:
+            status = "learning step: it comes back soon after an answer on purpose, so ask it even if it came up minutes ago"
+        word, extra = headword(prompt)
         s = f"#{card['id']} in deck \"{deck['name']}\" ({deck['deck_type']}, {direction}, {status})\n"
-        s += f"  Ask about: {prompt}"
+        s += f"  Ask about: {word}"
+        if extra:
+            s += f"\n  Also on the card's front, never shown to the user (don't refer to it): {extra}"
         if with_answer:
             s += f"\n  Answer (secret until they reply; the user can't see any of this card): {answer}"
         return s
@@ -451,14 +460,14 @@ class Agent:
         others = [c for c in queue if c["id"] != active]
         if others:
             lines.append(
-                f"Other cards due today ({len(others)}; don't reveal or discuss their answers; "
-                "if the talk turns to one of them, call postpone_card):"
+                f"Other cards due today ({len(others)}; never ask these yourself, the code picks the next one; "
+                "don't reveal or discuss their answers; if the talk turns to one of them, call postpone_card):"
             )
             for c in others[:DUE_LIST_LIMIT]:
                 note = self.store.note(c["note_id"])
                 deck = self.store.deck(note["deck_id"])
                 prompt, _ = card_sides(deck_fields(deck), note_fields(note["fields"]), c["ord"])
-                lines.append(f"  #{c['id']}: {prompt}")
+                lines.append(f"  #{c['id']}: {headword(prompt)[0]}")
         if later:
             lines.append(
                 f"Coming back later today ({len(later)}; learning steps after a recent answer, "
@@ -467,7 +476,7 @@ class Agent:
             for c in later[:DUE_LIST_LIMIT]:
                 note = self.store.note(c["note_id"])
                 deck = self.store.deck(note["deck_id"])
-                prompt, _ = card_sides(deck_fields(deck), note_fields(note["fields"]), c["ord"])
+                prompt = headword(card_sides(deck_fields(deck), note_fields(note["fields"]), c["ord"])[0])[0]
                 if turn.show_times:
                     at = parse(c["due"]).astimezone(tz).strftime("%H:%M")
                     lines.append(f"  #{c['id']}: {prompt} (at {at})")
@@ -665,7 +674,14 @@ class Agent:
             st = store.state(uid)
             card_id = int(args["card_id"])
             if st["active_card_id"] != card_id:
-                raise ValueError(f"Card #{card_id} is not the active card; only the active card can be graded.")
+                # The model sometimes asks a due card on its own instead of the active one. The
+                # user still answered it, so grade it rather than losing the answer.
+                due = srs.due_queue(store, turn.user, turn.now)
+                if card_id in turn.graded or all(c["id"] != card_id for c in due):
+                    raise ValueError(
+                        f"Card #{card_id} is not the active card; only the active card can be graded."
+                    )
+                log.info("grading card %s that the model asked instead of active %s", card_id, st["active_card_id"])
             rating = srs.RATING_BY_NAME.get(str(args["rating"]).lower())
             if rating is None:
                 raise ValueError("rating must be Again, Hard, Good or Easy")
