@@ -122,7 +122,7 @@ class App:
 
     def _model_menu(self, user_id: int) -> tuple[str, Kb | None]:
         current = self._model_name(user_id)
-        label = {CLAUDE: "Claude", FREE: f"the free model ({self.config.free_model})"}
+        label = {CLAUDE: "Claude", FREE: f"the free model ({self.config.free_label})"}
         text = f"You're using {label[current]}."
         if user_id not in self.config.owner_ids:
             return text, None
@@ -297,7 +297,7 @@ class App:
                 return
             choice = c.data.split(":", 1)[1]
             if choice == FREE and self.agent.models and self.agent.models.free is None:
-                await c.answer("The free model isn't set up yet (FREE_LLM_API_KEY is empty).", show_alert=True)
+                await c.answer("The free model isn't set up yet (no Gemini or Groq key).", show_alert=True)
                 return
             if choice in (CLAUDE, FREE):
                 self.store.update_user(uid, llm=choice)

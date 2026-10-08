@@ -23,6 +23,15 @@ class Config:
     free_model: str = "openai/gpt-oss-120b"
     # Tried in order when the one before is at its rate limit.
     free_fallback_models: tuple[str, ...] = ("openai/gpt-oss-20b",)
+    # Gemini's free tier, tried before the models above when it has a key.
+    gemini_api_key: str | None = None
+    gemini_models: tuple[str, ...] = ("gemini-3.8-flash", "gemini-2.5-flash")
+
+    @property
+    def free_label(self) -> str:
+        if self.gemini_api_key and self.free_api_key:
+            return "Gemini, with Groq as backup"
+        return "Gemini" if self.gemini_api_key else "Groq" if self.free_api_key else "not set up"
 
     @property
     def allowed_ids(self) -> frozenset[int]:
@@ -36,6 +45,10 @@ def _parse_ids(raw: str) -> frozenset[int]:
         if part:
             ids.add(int(part))
     return frozenset(ids)
+
+
+def _parse_list(raw: str) -> tuple[str, ...]:
+    return tuple(m.strip() for m in raw.split(",") if m.strip())
 
 
 def load_config() -> Config:
@@ -58,9 +71,7 @@ def load_config() -> Config:
         free_api_key=os.environ.get("FREE_LLM_API_KEY", "").strip() or None,
         free_base_url=os.environ.get("FREE_LLM_BASE_URL") or "https://api.groq.com/openai/v1",
         free_model=os.environ.get("FREE_LLM_MODEL") or "openai/gpt-oss-120b",
-        free_fallback_models=tuple(
-            m.strip()
-            for m in os.environ.get("FREE_LLM_FALLBACK_MODELS", "openai/gpt-oss-20b").split(",")
-            if m.strip()
-        ),
+        free_fallback_models=_parse_list(os.environ.get("FREE_LLM_FALLBACK_MODELS", "openai/gpt-oss-20b")),
+        gemini_api_key=os.environ.get("GEMINI_API_KEY", "").strip() or None,
+        gemini_models=_parse_list(os.environ.get("GEMINI_MODELS", "gemini-3.8-flash,gemini-2.5-flash")),
     )
