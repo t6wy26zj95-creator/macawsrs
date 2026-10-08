@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo, available_timezones
 from . import pacing, srs
 from .db import Store, iso, parse
 from .leak import contains_answer
-from .llm import LLMProvider, ToolSpec
+from .llm import LLMProvider, Models, ToolSpec
 from .prompts import SYSTEM_PROMPT
 from .templates import (
     DECK_TYPES,
@@ -90,9 +90,10 @@ INT = {"type": "integer"}
 
 
 class Agent:
-    def __init__(self, store: Store, llm: LLMProvider):
+    def __init__(self, store: Store, llm: LLMProvider, models: Models | None = None):
         self.store = store
         self.llm = llm
+        self.models = models  # when set, picks each user's model; otherwise everyone uses `llm`
 
     # ================= public entry points =================
 
@@ -154,7 +155,8 @@ class Agent:
     async def _run(self, turn: Turn, event: str) -> list[Action]:
         uid = turn.user["id"]
         prompt = self._context(turn) + "\n\n<event>\n" + event + "\n</event>"
-        reply = strip_emoji(await self.llm.run(SYSTEM_PROMPT, prompt, self._tools(turn)))
+        llm = self.models.for_user(turn.user) if self.models else self.llm
+        reply = strip_emoji(await llm.run(SYSTEM_PROMPT, prompt, self._tools(turn)))
         if reply:
             self._postpone_leaks(turn, reply, exclude=None)
             # The reply normally comes first. When it already asks the next card,

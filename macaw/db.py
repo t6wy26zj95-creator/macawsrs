@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS users (
     max_reminders       INTEGER NOT NULL DEFAULT 4,
     first_reminder_min  INTEGER NOT NULL DEFAULT 60,
     desired_retention   REAL NOT NULL DEFAULT 0.9,
+    llm                 TEXT,                         -- 'claude' or 'free'; NULL = default for the user
     created_at          TEXT NOT NULL
 );
 
@@ -137,6 +138,12 @@ class Store:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {r["name"] for r in self.q("PRAGMA table_info(users)")}
+        if "llm" not in cols:
+            self.x("ALTER TABLE users ADD COLUMN llm TEXT")
 
     # ---------- generic helpers ----------
 

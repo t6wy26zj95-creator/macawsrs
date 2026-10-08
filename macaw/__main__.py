@@ -12,7 +12,7 @@ from .agent import Agent
 from .bot.app import App, build_dispatcher
 from .config import load_config
 from .db import Store
-from .llm import make_provider
+from .llm import Models, make_free_provider, make_provider
 
 
 async def main() -> None:
@@ -26,7 +26,11 @@ async def main() -> None:
 
     store = Store(config.db_path)
     store.prune_messages()
-    agent = Agent(store, make_provider(config.llm_provider, config.claude_model))
+    claude = make_provider(config.llm_provider, config.claude_model)
+    free = make_free_provider(config.free_api_key, config.free_base_url, config.free_model)
+    if config.guest_ids and free is None:
+        logging.warning("GUEST_IDS is set but FREE_LLM_API_KEY is empty: guests can't chat yet")
+    agent = Agent(store, claude, Models(config.owner_ids, claude, free))
     bot = Bot(config.bot_token)
     app = App(config, store, agent, bot)
     dp = build_dispatcher(app)
@@ -36,6 +40,7 @@ async def main() -> None:
             BotCommand(command="decks", description="Your decks and their settings"),
             BotCommand(command="review", description="Review a card now"),
             BotCommand(command="settings", description="Timezone, quiet hours, reminders"),
+            BotCommand(command="model", description="Which AI model you're using"),
         ]
     )
     ticker = asyncio.create_task(app.ticker())

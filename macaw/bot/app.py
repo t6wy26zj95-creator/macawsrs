@@ -13,12 +13,14 @@ from aiogram.enums import ChatAction, ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
+from aiogram.types import InlineKeyboardButton as Btn
+from aiogram.types import InlineKeyboardMarkup as Kb
 
 from .. import pacing, srs
 from ..agent import Action, Agent, ConfirmDelete, Preview, RatingNote, Text
 from ..config import Config
 from ..db import Store, iso, parse
-from ..llm import LLMError
+from ..llm import CLAUDE, FREE, LLMError
 from ..prompts import GREETING
 from . import menus, render
 
@@ -96,18 +98,41 @@ class App:
                 user_id, llm_backoff_until=iso(_now() + timedelta(minutes=LLM_BACKOFF_MIN))
             )
             if notify:
-                await self.bot.send_message(
-                    chat_id,
-                    "I can't reach Claude right now (maybe the Pro usage limit was hit). "
-                    "Try again in a little while; your cards are safe.",
-                )
+                if self._model_name(user_id) == CLAUDE:
+                    why = "I can't reach Claude right now (maybe the Pro usage limit was hit)."
+                else:
+                    why = "I can't reach the free AI model right now (maybe its daily limit was hit)."
+                await self.bot.send_message(chat_id, why + " Try again in a little while; your cards are safe.")
             return
         await self.send_actions(chat_id, actions)
 
     # ================= handlers =================
 
     def _allowed(self, user_id: int | None) -> bool:
-        return user_id is not None and user_id in self.config.owner_ids
+        return user_id is not None and user_id in self.config.allowed_ids
+
+    def _model_name(self, user_id: int) -> str:
+        user = self.store.get_user(user_id)
+        models = self.agent.models
+        return models.name_for(dict(user)) if models and user else CLAUDE
+
+    def _model_menu(self, user_id: int) -> tuple[str, Kb | None]:
+        current = self._model_name(user_id)
+        label = {CLAUDE: "Claude", FREE: f"the free model ({self.config.free_model})"}
+        text = f"You're using {label[current]}."
+        if user_id not in self.config.owner_ids:
+            return text, None
+        text += " Your cards and our chat stay the same when you switch."
+        mark = lambda name: "• " if name == current else ""  # noqa: E731
+        kb = Kb(
+            inline_keyboard=[
+                [
+                    Btn(text=mark(CLAUDE) + "Claude", callback_data="llm:" + CLAUDE),
+                    Btn(text=mark(FREE) + "Free model", callback_data="llm:" + FREE),
+                ]
+            ]
+        )
+        return text, kb
 
     def _register(self) -> None:
         r = self.router
@@ -150,6 +175,14 @@ class App:
                 "To change any of these, just tell me, e.g. \"I'm in Berlin\" or \"ask me 3 cards at a time\".",
                 parse_mode=None,
             )
+
+        @r.message(Command("model"))
+        async def model(m: Message):
+            if not self._allowed(m.from_user and m.from_user.id):
+                return
+            self.store.ensure_user(m.from_user.id, m.chat.id, self.config.default_timezone)
+            text, kb = self._model_menu(m.from_user.id)
+            await m.answer(text, reply_markup=kb, parse_mode=None)
 
         @r.message(F.text)
         async def text(m: Message):
@@ -224,6 +257,26 @@ class App:
                 await c.message.edit_text("Deleted.")
             else:
                 await c.message.edit_text("Kept it.")
+            await c.answer()
+
+        @r.callback_query(F.data.startswith("llm:"))
+        async def model_cb(c: CallbackQuery):
+            uid = c.from_user.id
+            # Only owners may switch; guests can never be moved onto Claude.
+            if uid not in self.config.owner_ids:
+                await c.answer()
+                return
+            choice = c.data.split(":", 1)[1]
+            if choice == FREE and self.agent.models and self.agent.models.free is None:
+                await c.answer("The free model isn't set up yet (FREE_LLM_API_KEY is empty).", show_alert=True)
+                return
+            if choice in (CLAUDE, FREE):
+                self.store.update_user(uid, llm=choice)
+                # A Claude outage shouldn't keep blocking the other model, and vice versa.
+                self.store.update_state(uid, llm_backoff_until=None)
+            text, kb = self._model_menu(uid)
+            with contextlib.suppress(TelegramBadRequest):  # "message is not modified"
+                await c.message.edit_text(text, reply_markup=kb)
             await c.answer()
 
         @r.callback_query(F.data.startswith("m:"))
@@ -367,7 +420,7 @@ class App:
             if self.store.backup(self.config.db_path.parent / "backups"):
                 log.info("database backup written")
         for user in self.store.all_users():
-            if user["id"] not in self.config.owner_ids:
+            if user["id"] not in self.config.allowed_ids:
                 continue
             lock = self.lock(user["id"])
             if lock.locked():
