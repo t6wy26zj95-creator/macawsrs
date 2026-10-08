@@ -25,11 +25,11 @@ Planned next: .apkg import/export for Anki and AnkiMobile, and an ebook reader.
 | Answer-leak check | `macaw/leak.py` |
 | Storage (SQLite) | `macaw/db.py` |
 | Claude via your Pro subscription | `macaw/llm/claude.py` |
-| Free model (Groq or any OpenAI-style API) | `macaw/llm/openai_compat.py` |
+| Free model (Gemini, Groq or any OpenAI-style API) | `macaw/llm/openai_compat.py` |
 
 Claude can only change anything through the tools in `agent.py`. Due dates are always computed by FSRS in code. The Claude provider runs Claude Code through the Claude Agent SDK with no built-in tools (no shell, no file access), authenticated with your Pro subscription token. Other model providers can be added next to it in `macaw/llm/`.
 
-**Claude and the free model.** People in `OWNER_IDS` use Claude by default and can switch themselves to the free model and back with /model. Friends join with a one-time link from /invite (or by ID in `GUEST_IDS`); they always use the free model and can never be switched to Claude, so your Pro subscription is only ever used for you. Everyone gets their own decks, reminders and settings. /guests lists friends and removes them. Cards and chat history live in the bot's database, not in the model, so switching models mid-conversation loses nothing. The free model is Groq by default (`FREE_LLM_API_KEY` from console.groq.com/keys).
+**Claude and the free model.** People in `OWNER_IDS` use Claude by default and can switch themselves to the free model and back with /model. Friends join with a one-time link from /invite (or by ID in `GUEST_IDS`); they always use the free model and can never be switched to Claude, so your Pro subscription is only ever used for you. Everyone gets their own decks, reminders and settings. /guests lists friends and removes them. Cards and chat history live in the bot's database, not in the model, so switching models mid-conversation loses nothing. The free model is Gemini (`GEMINI_API_KEY` from aistudio.google.com/apikey) and/or Groq (`FREE_LLM_API_KEY` from console.groq.com/keys). With both keys, Gemini answers first and Groq takes over whenever Gemini is busy or failing.
 
 ## Setup on the VPS
 

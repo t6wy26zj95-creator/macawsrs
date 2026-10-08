@@ -1,6 +1,6 @@
 """Language model providers. Each turn runs on one `LLMProvider`: Claude via the
-Pro subscription for owners, or the free model (any OpenAI-style API, Groq by
-default) for guests and for owners who switch to it."""
+Pro subscription for owners, or the free model (Gemini and/or Groq, through
+their OpenAI-style APIs) for guests and for owners who switch to it."""
 
 from __future__ import annotations
 
@@ -59,16 +59,28 @@ class Models:
         if self.name_for(user) == CLAUDE:
             return self.claude
         if self.free is None:
-            raise LLMError("the free model is not set up (FREE_LLM_API_KEY is empty)")
+            raise LLMError("the free model is not set up (GEMINI_API_KEY and FREE_LLM_API_KEY are empty)")
         return self.free
 
 
-def make_free_provider(
-    api_key: str | None, base_url: str, model: str, fallbacks: tuple[str, ...] = ()
-) -> LLMProvider | None:
-    if not api_key:
-        return None
-    from .openai_compat import OpenAICompatProvider
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
-    models = [model] + [m for m in fallbacks if m != model]
-    return OpenAICompatProvider(base_url, api_key, models)
+
+def make_free_provider(
+    api_key: str | None,
+    base_url: str,
+    model: str,
+    fallbacks: tuple[str, ...] = (),
+    gemini_key: str | None = None,
+    gemini_models: tuple[str, ...] = (),
+) -> LLMProvider | None:
+    """The free model: Gemini first if it has a key, then Groq (or another
+    OpenAI-style API). Each next one takes over when the one before is busy."""
+    from .openai_compat import OpenAICompatProvider, Slot
+
+    slots: list[Slot] = []
+    if gemini_key:
+        slots += [Slot(GEMINI_BASE_URL, gemini_key, m) for m in gemini_models]
+    if api_key:
+        slots += [Slot(base_url, api_key, m) for m in dict.fromkeys([model, *fallbacks])]
+    return OpenAICompatProvider(slots=slots) if slots else None

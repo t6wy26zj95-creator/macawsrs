@@ -29,10 +29,15 @@ async def main() -> None:
     store.prune_messages()
     claude = make_provider(config.llm_provider, config.claude_model)
     free = make_free_provider(
-        config.free_api_key, config.free_base_url, config.free_model, config.free_fallback_models
+        config.free_api_key,
+        config.free_base_url,
+        config.free_model,
+        config.free_fallback_models,
+        config.gemini_api_key,
+        config.gemini_models,
     )
     if config.guest_ids and free is None:
-        logging.warning("GUEST_IDS is set but FREE_LLM_API_KEY is empty: guests can't chat yet")
+        logging.warning("GUEST_IDS is set but GEMINI_API_KEY and FREE_LLM_API_KEY are empty: guests can't chat yet")
     agent = Agent(store, claude, Models(config.owner_ids, claude, free))
     bot = Bot(config.bot_token)
     app = App(config, store, agent, bot)

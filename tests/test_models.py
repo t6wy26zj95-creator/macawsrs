@@ -92,7 +92,7 @@ async def test_openai_compat_runs_tool_rounds(monkeypatch):
     ]
     bodies = []
 
-    async def fake_post(self, session, body):
+    async def fake_post(self, session, slot, body):
         bodies.append(json.loads(json.dumps(body)))
         return replies.pop(0)
 
@@ -148,7 +148,7 @@ async def test_rate_limit_moves_to_next_model_then_waits(monkeypatch):
     seen = []
     limited = {"a": 2, "b": 1}  # how many more times each model answers 429
 
-    async def fake_post(self, session, body):
+    async def fake_post(self, session, slot, body):
         seen.append(body["model"])
         if limited[body["model"]] > 0:
             limited[body["model"]] -= 1
@@ -173,7 +173,7 @@ async def test_rate_limit_moves_to_next_model_then_waits(monkeypatch):
 async def test_gives_up_when_wait_is_too_long(monkeypatch):
     from macaw.llm import openai_compat as oc
 
-    async def fake_post(self, session, body):
+    async def fake_post(self, session, slot, body):
         raise oc.RateLimited(500)
 
     monkeypatch.setattr(OpenAICompatProvider, "_post", fake_post)
@@ -183,10 +183,10 @@ async def test_gives_up_when_wait_is_too_long(monkeypatch):
 
 
 def test_gpt_oss_gets_low_reasoning_effort():
-    from macaw.llm.openai_compat import _body_for
+    from macaw.llm.openai_compat import Slot, _body_for
 
-    assert _body_for("openai/gpt-oss-20b", {})["reasoning_effort"] == "low"
-    assert "reasoning_effort" not in _body_for("qwen/qwen3.8-27b", {})
+    assert _body_for(Slot("https://api.groq.com/openai/v1", "k", "openai/gpt-oss-20b"), {})["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in _body_for(Slot("https://api.groq.com/openai/v1", "k", "qwen/qwen3.8-27b"), {})
 
 
 async def test_answering_an_active_card_requires_a_tool(store):
@@ -224,7 +224,7 @@ async def test_openai_compat_requires_tool_only_on_first_round(monkeypatch):
         {"choices": [{"message": {"content": "ok"}}]},
     ]
 
-    async def fake_post(self, session, body):
+    async def fake_post(self, session, slot, body):
         bodies.append(body)
         return replies.pop(0)
 
@@ -290,3 +290,52 @@ async def test_times_reach_the_model_only_when_asked(store):
     assert not clock.search(llm.prompts[-1])
     await agent.on_user_message(UID, "when is the next card?", NOW)
     assert clock.search(llm.prompts[-1])
+
+
+def test_free_provider_puts_gemini_before_groq():
+    from macaw.llm import make_free_provider
+
+    p = make_free_provider("gsk", "https://api.groq.com/openai/v1", "a", ("b",), "gem", ("g1", "g2"))
+    assert [s.model for s in p.slots] == ["g1", "g2", "a", "b"]
+    assert p.slots[0].is_gemini and not p.slots[2].is_gemini
+    assert make_free_provider(None, "x", "a", (), None, ("g1",)) is None
+    assert [s.model for s in make_free_provider(None, "x", "a", (), "gem", ("g1",)).slots] == ["g1"]
+
+
+def test_gemini_body_drops_additional_properties():
+    from macaw.llm.openai_compat import Slot, _body_for
+
+    tool = {"type": "function", "function": {"name": "t", "parameters": {
+        "type": "object", "additionalProperties": False,
+        "properties": {"x": {"type": "object", "additionalProperties": False}}}}}
+    body = _body_for(Slot("https://generativelanguage.googleapis.com/v1beta/openai/", "k", "g"), {"tools": [tool]})
+    assert "additionalProperties" not in json.dumps(body)
+    assert body["reasoning_effort"] == "low"
+    assert tool["function"]["parameters"]["additionalProperties"] is False  # original untouched
+
+
+async def test_broken_model_falls_through_and_tool_choice_retried(monkeypatch):
+    from macaw.llm import openai_compat as oc
+
+    calls = []
+
+    async def fake_post(self, session, slot, body):
+        calls.append((slot.model, "tool_choice" in body))
+        if slot.model == "dead":
+            raise oc.HTTPError(404, "dead: not found")
+        if "tool_choice" in body:
+            raise oc.HTTPError(400, "bad tool_choice")
+        return {"choices": [{"message": {"content": "hi from " + slot.model}}]}
+
+    async def handler(args):
+        return "x"
+
+    monkeypatch.setattr(OpenAICompatProvider, "_post", fake_post)
+    p = OpenAICompatProvider(slots=[oc.Slot("u", "k", "dead"), oc.Slot("u", "k", "ok")])
+    tools = [ToolSpec("t", "d", {"type": "object", "properties": {}}, handler)]
+    assert await p.run("s", "p", tools, must_use_tool=True) == "hi from ok"
+    assert calls == [("dead", True), ("ok", True), ("ok", False)]
+    # The dead one is skipped for a while on the next turn.
+    calls.clear()
+    assert await p.run("s", "p", tools) == "hi from ok"
+    assert calls == [("ok", False)]
