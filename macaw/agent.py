@@ -55,6 +55,15 @@ TIME_QUESTION = re.compile(
 )
 
 
+# Weaker models fill an optional "missed" field with filler instead of leaving it empty.
+NOTHING_MISSED = re.compile(r"^\W*(?:none|nothing|n/?a|no|nil|complete|-+)?\W*$", re.I)
+
+
+def clean_missed(text: Any) -> str:
+    text = strip_emoji(str(text or ""))
+    return "" if NOTHING_MISSED.match(text) else text
+
+
 # ---------- actions the Telegram layer performs after a turn ----------
 
 
@@ -105,6 +114,8 @@ def _jsonschema(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
 HISTORY_MESSAGES = 16
 # How long after grading a card its grade can still be changed in chat.
 REGRADE_WINDOW = timedelta(hours=6)
+# The user's answer may repeat a card graded this recently without postponing it.
+JUST_GRADED = timedelta(minutes=30)
 MAX_MESSAGE_CHARS = 500
 DUE_LIST_LIMIT = 15
 
@@ -132,7 +143,11 @@ class Agent:
         self._adopt_asked_card(turn, last_bot)
         st = self.store.state(user_id)
         # The user mentioning the answer of a card that is due but not being asked postpones it.
-        self._postpone_leaks(turn, text, exclude=st["active_card_id"])
+        # The card just graded is exempt: talking it over (or saying it back) is expected.
+        just_graded = self.store.last_graded(user_id, now - JUST_GRADED)
+        self._postpone_leaks(
+            turn, text, exclude={st["active_card_id"], just_graded["card_id"] if just_graded else None}
+        )
         event = "The user just wrote the last message in the conversation above. Reply to it."
         answering = bool(st["active_card_id"] and self.store.card(st["active_card_id"]))
         if answering:
@@ -234,7 +249,7 @@ class Agent:
             )
         reply = strip_emoji(await llm.run(SYSTEM_PROMPT, prompt, tools, must_use_tool=must_use_tool))
         if reply:
-            self._postpone_leaks(turn, reply, exclude=None)
+            self._postpone_leaks(turn, reply, exclude=set())
             self._postpone_named_lookalikes(turn, reply)
             # The reply normally comes first. When it already asks the next card,
             # show the grade first so it isn't read as the grade of the new question.
@@ -300,11 +315,11 @@ class Agent:
         prompt, _ = card_sides(deck_fields(deck), note_fields(note["fields"]), card["ord"])
         return contains_answer(text, headword(prompt)[0])
 
-    def _postpone_leaks(self, turn: Turn, text: str, exclude: int | None) -> None:
+    def _postpone_leaks(self, turn: Turn, text: str, exclude: set[int | None]) -> None:
         """Postpone due cards whose answer appears in the text.
 
-        `exclude` is the card the user is currently answering (their answer is
-        allowed to contain its answer)."""
+        `exclude` holds the card the user is currently answering (their answer is
+        allowed to contain its answer) and the one just graded."""
         uid = turn.user["id"]
         st = self.store.state(uid)
         candidates = srs.due_queue(self.store, turn.user, turn.now)
@@ -314,7 +329,7 @@ class Agent:
             if row:
                 candidates.append(dict(row))
         for c in candidates:
-            if c["id"] == exclude or c["id"] in turn.graded or c["id"] in turn.postponed:
+            if c["id"] in exclude or c["id"] in turn.graded or c["id"] in turn.postponed:
                 continue
             note = self.store.note(c["note_id"])
             deck = self.store.deck(note["deck_id"])
@@ -418,6 +433,29 @@ class Agent:
             s += f"\n  Also on the card's front, never shown to the user (don't refer to it): {extra}"
         if with_answer:
             s += f"\n  Answer (secret until they reply; the user can't see any of this card): {answer}"
+            s += self._answer_history(card["id"])
+        return s
+
+    def _answer_history(self, card_id: int) -> str:
+        """What earlier answers to this card left out, so a gap that keeps coming
+        back gets noticed and worked on instead of mentioned once and forgotten."""
+        rows = self.store.answer_history(card_id)
+        if not rows:
+            return ""
+        lines = [
+            f"    - {parse(r['reviewed_at']):%d %b}: {srs.RATING_NAMES[r['rating']]}, "
+            + (f"missed: {r['missed']}" if r["missed"] else "complete answer")
+            for r in rows
+        ]
+        s = "\n  Earlier answers to this card (your private notes):\n" + "\n".join(lines)
+        gaps = sum(1 for r in rows if r["missed"])
+        if gaps:
+            s += (
+                "\n  Don't hint at the missed part when asking. If the answer covers it this time, "
+                "say in a few words that they got that part now."
+            )
+        if gaps >= 2:
+            s += " The same card has fallen short more than once: give the missed part real attention after grading."
         return s
 
     def _context(self, turn: Turn) -> str:
@@ -708,7 +746,11 @@ class Agent:
             if rating is None:
                 raise ValueError("rating must be Again, Hard, Good or Easy")
             reason = strip_emoji(args.get("reason") or "") or None
-            log_id = srs.grade(store, turn.user, card_id, rating, "claude", reason, turn.now)
+            missed = clean_missed(args.get("missed"))
+            if not missed and rating <= srs.RATING_BY_NAME["hard"] and reason:
+                missed = reason  # a model that skipped the field: the reason says what went wrong
+            before = [r["missed"] for r in store.answer_history(card_id) if r["missed"]]
+            log_id = srs.grade(store, turn.user, card_id, rating, "claude", reason, turn.now, missed)
             tz = srs.tz_of(turn.user)
             back = (
                 f"(The user asked about timing: this card comes back {srs.comes_back(turn.user, store.card(card_id), turn.now)}.)"
@@ -721,6 +763,23 @@ class Agent:
             count = st["session_count"] + 1
             store.update_state(uid, active_card_id=None, asked_at=None, session_count=count, reminders_streak=0)
             target = turn.user["cards_per_session"] + st["burst"]
+            if missed and before:
+                # The same card fell short again: teach it properly and have the user say it
+                # back before the next card. The timer brings the next one up after their reply.
+                if count >= target:
+                    self._end_session(turn)
+                else:
+                    store.update_state(uid, next_ask_at=iso(turn.now))
+                earlier = "; ".join(before)
+                return (
+                    f"Graded {srs.RATING_NAMES[rating]}. {back} This card has fallen short before "
+                    f"(earlier: {earlier}; now: {missed}). Don't move on quickly this time. Kindly say "
+                    "this part keeps slipping, explain it clearly by contrasting it with what they said, "
+                    "add one short memory hook (like the word's origin or a vivid contrast; no example "
+                    "sentences), then ask them to put the full meaning in their own words. Do NOT ask "
+                    "another card in this message; the code brings the next one up after they reply. "
+                    "Their reply is not graded: confirm it or gently fill what's still missing."
+                )
             if count < target:
                 nxt = self._activate_next(turn)
                 if nxt is not None:
@@ -762,6 +821,8 @@ class Agent:
                 return f"It is already graded {old}; nothing changed."
             reason = strip_emoji(args.get("reason") or "") or None
             srs.regrade(store, turn.user, last["id"], rating, "claude", reason)
+            if "missed" in args:
+                store.set_review_missed(last["id"], clean_missed(args["missed"]))
             st = store.state(uid)
             offer = not st["active_card_id"] and bool(srs.due_queue(store, turn.user, turn.now))
             turn.actions.append(RatingNote(last["id"], offer_next=offer, changed=True))
@@ -924,6 +985,12 @@ class Agent:
                             "description": "One short line shown to the user: why this grade. Never mention "
                             "when the card comes back; the code adds the real time.",
                         },
+                        "missed": {
+                            "type": "string",
+                            "description": "Private note, never shown: the part of the card's meaning the answer "
+                            "left out or got wrong, in a few words (e.g. 'the skill sense, said only agility'). "
+                            "Fill it even for a Good answer that missed a nuance. Empty string if nothing was missing.",
+                        },
                     },
                     ["card_id", "rating", "reason"],
                 ),
@@ -938,6 +1005,11 @@ class Agent:
                         "card_id": INT,
                         "rating": {"type": "string", "enum": ["Again", "Hard", "Good", "Easy"]},
                         "reason": {"type": "string", "description": "One short line shown to the user: why this grade."},
+                        "missed": {
+                            "type": "string",
+                            "description": "Optional: corrected private note of what the answer left out "
+                            "(empty string if it was complete).",
+                        },
                     },
                     ["card_id", "rating", "reason"],
                 ),

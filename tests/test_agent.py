@@ -6,6 +6,7 @@ from datetime import timedelta
 
 import pytest
 
+from macaw import srs
 from macaw.agent import REGRADE_WINDOW, Agent, ConfirmDelete, Preview, RatingNote, Text
 from macaw.bot.app import App
 from macaw.config import Config
@@ -641,3 +642,65 @@ async def test_only_the_latest_grade_can_be_changed(agent, llm, store):
 
     llm.script.append(regrade)
     await agent.on_user_message(UID, "hm", later)
+
+
+# ---------- answers that keep falling short ----------
+
+
+async def test_filler_missed_notes_count_as_nothing():
+    from macaw.agent import clean_missed
+
+    for s in ("", None, "none", "Nothing.", "n/a", "-", " complete "):
+        assert clean_missed(s) == ""
+    assert clean_missed("the skill sense") == "the skill sense"
+
+
+async def test_a_gap_that_comes_back_is_noticed_and_taught(agent, llm, store):
+    await _make_deck_with_card(agent, llm, word="dexterous", meaning="skillful, especially with the hands")
+    llm.script.append(lambda p, t: _ret("What does 'dexterous' mean?"))
+    await agent.ask_next(UID, NOW)
+    card_id = store.state(UID)["active_card_id"]
+
+    async def first(prompt, t):
+        assert "Earlier answers" not in prompt
+        out = await t["grade_card"](
+            {"card_id": card_id, "rating": "Good", "reason": "agile, yes", "missed": "the skill sense"}
+        )
+        assert "fallen short" not in out
+        return "Right, and it's also about skill."
+
+    llm.script.append(first)
+    await agent.on_user_message(UID, "having agility", NOW + timedelta(minutes=1))
+    assert store.answer_history(card_id)[-1]["missed"] == "the skill sense"
+
+    later = srs.parse(store.card(card_id)["due"]) + timedelta(minutes=1)
+    llm.script.append(lambda p, t: _ret("What does 'dexterous' mean?"))
+    await agent.ask_next(UID, later)
+    brief = llm.prompts[-1]
+    assert "Earlier answers to this card" in brief and "Good, missed: the skill sense" in brief
+
+    async def second(prompt, t):
+        assert "Good, missed: the skill sense" in prompt
+        out = await t["grade_card"](
+            {"card_id": card_id, "rating": "Again", "reason": "agile again", "missed": "skill, again"}
+        )
+        assert "fallen short before" in out and "the skill sense" in out
+        assert "Do NOT ask another card" in out
+        return "That's the second time skill slipped. Put it in your own words?"
+
+    llm.script.append(second)
+    await agent.on_user_message(UID, "agile", later + timedelta(minutes=1))
+    assert store.state(UID)["active_card_id"] is None
+
+    # Saying the meaning back doesn't count as leaking the card's answer.
+    back = srs.parse(store.card(card_id)["due"]) + timedelta(minutes=1)
+    assert back < later + timedelta(minutes=30)
+    llm.script.append(lambda p, t: _ret("Exactly."))
+    await agent.on_user_message(UID, "skillful, especially with the hands", back)
+    assert store.card(card_id)["buried_until"] is None
+
+
+async def test_skipped_missed_field_falls_back_to_the_reason_on_hard(agent, llm, store):
+    card_id, actions = await _graded_hard(agent, llm, store)
+    log_id = next(a for a in actions if isinstance(a, RatingNote)).log_id
+    assert store.review(log_id)["missed"] == "core idea, but not all"

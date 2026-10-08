@@ -75,7 +75,8 @@ CREATE TABLE IF NOT EXISTS review_log (
     after        TEXT NOT NULL,                        -- JSON card scheduling state after
     source       TEXT NOT NULL,                        -- 'claude' or 'user'
     reason       TEXT,
-    message_id   INTEGER                               -- Telegram message showing the grade
+    message_id   INTEGER,                              -- Telegram message showing the grade
+    missed       TEXT                                  -- what the answer left out ('' = complete, NULL = not recorded)
 );
 CREATE INDEX IF NOT EXISTS review_log_card ON review_log(card_id);
 CREATE INDEX IF NOT EXISTS review_log_time ON review_log(reviewed_at);
@@ -180,6 +181,8 @@ class Store:
         review_cols = {r["name"] for r in self.q("PRAGMA table_info(review_log)")}
         if "message_id" not in review_cols:
             self.x("ALTER TABLE review_log ADD COLUMN message_id INTEGER")
+        if "missed" not in review_cols:
+            self.x("ALTER TABLE review_log ADD COLUMN missed TEXT")
 
     # ---------- generic helpers ----------
 
@@ -465,11 +468,12 @@ class Store:
         after: dict,
         source: str,
         reason: str | None,
+        missed: str | None = None,
     ) -> int:
         return self.x(
-            "INSERT INTO review_log(card_id, rating, reviewed_at, before, after, source, reason) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (card_id, rating, iso(reviewed_at), json.dumps(before), json.dumps(after), source, reason),
+            "INSERT INTO review_log(card_id, rating, reviewed_at, before, after, source, reason, missed) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (card_id, rating, iso(reviewed_at), json.dumps(before), json.dumps(after), source, reason, missed),
         )
 
     def review(self, log_id: int) -> sqlite3.Row | None:
@@ -482,6 +486,17 @@ class Store:
             "UPDATE review_log SET rating=?, after=?, source=?, reason=COALESCE(?, reason) WHERE id=?",
             (rating, json.dumps(after), source, reason, log_id),
         )
+
+    def set_review_missed(self, log_id: int, missed: str) -> None:
+        self.x("UPDATE review_log SET missed=? WHERE id=?", (missed, log_id))
+
+    def answer_history(self, card_id: int, limit: int = 4) -> list[sqlite3.Row]:
+        """The card's latest reviews where the bot noted what the answer missed, oldest first."""
+        rows = self.q(
+            "SELECT * FROM review_log WHERE card_id=? AND missed IS NOT NULL ORDER BY id DESC LIMIT ?",
+            (card_id, limit),
+        )
+        return rows[::-1]
 
     def set_review_message(self, log_id: int, message_id: int) -> None:
         self.x("UPDATE review_log SET message_id=? WHERE id=?", (message_id, log_id))

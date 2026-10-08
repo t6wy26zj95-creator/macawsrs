@@ -69,7 +69,7 @@ def next_schedule(
 
 
 def grade(store: Store, user: Mapping[str, Any], card_id: int, rating: int, source: str,
-          reason: str | None = None, when: datetime | None = None) -> int:
+          reason: str | None = None, when: datetime | None = None, missed: str | None = None) -> int:
     """Apply a rating to a card and log it. Returns the review log id."""
     when = when or datetime.now(timezone.utc)
     row = store.card(card_id)
@@ -79,7 +79,7 @@ def grade(store: Store, user: Mapping[str, Any], card_id: int, rating: int, sour
     after = next_schedule(scheduler_for(user), card_id, before, rating, when)
     store.set_card_schedule(card_id, after)
     store.x("UPDATE cards SET buried_until=NULL WHERE id=?", (card_id,))
-    return store.add_review(card_id, rating, when, before, after, source, reason)
+    return store.add_review(card_id, rating, when, before, after, source, reason, missed)
 
 
 def regrade(store: Store, user: Mapping[str, Any], log_id: int, rating: int,
