@@ -83,7 +83,7 @@ class OpenAICompatProvider:
             waits += 1
             await asyncio.sleep(max(wait, 0.5))
 
-    async def run(self, system: str, prompt: str, tools: list[ToolSpec]) -> str:
+    async def run(self, system: str, prompt: str, tools: list[ToolSpec], must_use_tool: bool = False) -> str:
         by_name = {t.name: t for t in tools}
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system},
@@ -94,10 +94,13 @@ class OpenAICompatProvider:
             for t in tools
         ]
         async with aiohttp.ClientSession(timeout=self.timeout) as session:
-            for _ in range(self.max_turns):
+            for round_no in range(self.max_turns):
                 body: dict[str, Any] = {"messages": messages}
                 if tool_defs:
                     body["tools"] = tool_defs
+                    if must_use_tool and round_no == 0:
+                        # Smaller models often reply "you got it" without calling grade_card.
+                        body["tool_choice"] = "required"
                 data = await self._complete(session, body)
                 try:
                     msg = data["choices"][0]["message"]

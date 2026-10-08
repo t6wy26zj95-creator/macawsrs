@@ -23,9 +23,11 @@ class FakeLLM:
         self.script: list[Callable[[str, dict[str, Callable[[dict], Awaitable[str]]]], Awaitable[str]]] = []
         self.prompts: list[str] = []
         self.tool_results: list[str] = []
+        self.must_use_tool: list[bool] = []
 
-    async def run(self, system: str, prompt: str, tools: list[ToolSpec]) -> str:
+    async def run(self, system: str, prompt: str, tools: list[ToolSpec], must_use_tool: bool = False) -> str:
         self.prompts.append(prompt)
+        self.must_use_tool.append(must_use_tool)
         handlers = {}
         for t in tools:
             async def call(args: dict[str, Any], t=t) -> str:

@@ -20,8 +20,8 @@ class Named(FakeLLM):
         super().__init__()
         self.name = name
 
-    async def run(self, system, prompt, tools):
-        await super().run(system, prompt, tools)
+    async def run(self, system, prompt, tools, must_use_tool=False):
+        await super().run(system, prompt, tools, must_use_tool)
         return f"from {self.name}"
 
 
@@ -186,3 +186,55 @@ def test_gpt_oss_gets_low_reasoning_effort():
 
     assert _body_for("openai/gpt-oss-20b", {})["reasoning_effort"] == "low"
     assert "reasoning_effort" not in _body_for("qwen/qwen3.8-27b", {})
+
+
+async def test_answering_an_active_card_requires_a_tool(store):
+    from macaw.agent import Agent
+    from .test_agent import _make_deck_with_card
+
+    llm = FakeLLM()
+    agent = Agent(store, llm)
+    await _make_deck_with_card(agent, llm)
+    await agent.on_user_message(UID, "hi", NOW)
+    assert llm.must_use_tool[-1] is False  # no open card: free chat
+
+    llm.script.append(lambda p, t: _ret("What does 'ubiquitous' mean?"))
+    await agent.ask_next(UID, NOW)
+
+    seen = {}
+
+    async def step(prompt, t):
+        seen["prompt"] = prompt
+        seen["tools"] = set(t)
+        return await t["not_an_answer"]({})
+
+    llm.script.append(step)
+    await agent.on_user_message(UID, "hey that was abrupt", NOW)
+    assert llm.must_use_tool[-1] is True
+    assert "not_an_answer" in seen["tools"] and "call grade_card before you reply" in seen["prompt"]
+    assert store.state(UID)["active_card_id"]  # still open
+
+
+async def test_openai_compat_requires_tool_only_on_first_round(monkeypatch):
+    bodies = []
+    replies = [
+        {"choices": [{"message": {"content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "t", "arguments": "{}"}}]}}]},
+        {"choices": [{"message": {"content": "ok"}}]},
+    ]
+
+    async def fake_post(self, session, body):
+        bodies.append(body)
+        return replies.pop(0)
+
+    async def handler(args):
+        return "done"
+
+    monkeypatch.setattr(OpenAICompatProvider, "_post", fake_post)
+    p = OpenAICompatProvider("https://x.test/v1", "k", "m")
+    await p.run("s", "p", [ToolSpec("t", "d", {"type": "object", "properties": {}}, handler)], must_use_tool=True)
+    assert bodies[0]["tool_choice"] == "required" and "tool_choice" not in bodies[1]
+
+
+async def _ret(text):
+    return text

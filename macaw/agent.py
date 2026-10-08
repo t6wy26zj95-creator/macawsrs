@@ -106,12 +106,20 @@ class Agent:
         # The user mentioning the answer of a card that is due but not being asked postpones it.
         self._postpone_leaks(turn, text, exclude=st["active_card_id"])
         event = "The user just wrote the last message in the conversation above. Reply to it."
+        answering = bool(st["active_card_id"] and self.store.card(st["active_card_id"]))
+        if answering:
+            event += (
+                f"\n\nThe ACTIVE CARD #{st['active_card_id']} is waiting for an answer. If this message "
+                "answers it (even partly, or says they don't know), call grade_card before you reply. "
+                "If the message reveals or asks for its answer, call postpone_card. Otherwise call "
+                "not_an_answer, then just chat."
+            )
         if st["editing_proposal_id"]:
             event += (
                 f"\n\n(The user is editing card preview #{st['editing_proposal_id']}; "
                 "if this message describes changes, call revise_proposal.)"
             )
-        return await self._run(turn, event)
+        return await self._run(turn, event, must_use_tool=answering)
 
     async def ask_next(self, user_id: int, now: datetime | None = None) -> list[Action]:
         """Called by the timer when it's time for the next card."""
@@ -152,11 +160,25 @@ class Agent:
         user = dict(self.store.get_user(user_id))
         return Turn(user=user, now=now)
 
-    async def _run(self, turn: Turn, event: str) -> list[Action]:
+    async def _run(self, turn: Turn, event: str, must_use_tool: bool = False) -> list[Action]:
         uid = turn.user["id"]
         prompt = self._context(turn) + "\n\n<event>\n" + event + "\n</event>"
         llm = self.models.for_user(turn.user) if self.models else self.llm
-        reply = strip_emoji(await llm.run(SYSTEM_PROMPT, prompt, self._tools(turn)))
+        tools = self._tools(turn)
+        if must_use_tool:
+            # Gives a model that must call a tool an honest choice when the message isn't an answer.
+            async def not_an_answer(args):
+                return "OK. Don't grade; reply to the message. The card stays open."
+
+            tools.append(
+                ToolSpec(
+                    "not_an_answer",
+                    "Call this when the user's message is not an answer to the active card, so it stays open.",
+                    _jsonschema({}, []),
+                    not_an_answer,
+                )
+            )
+        reply = strip_emoji(await llm.run(SYSTEM_PROMPT, prompt, tools, must_use_tool=must_use_tool))
         if reply:
             self._postpone_leaks(turn, reply, exclude=None)
             # The reply normally comes first. When it already asks the next card,
