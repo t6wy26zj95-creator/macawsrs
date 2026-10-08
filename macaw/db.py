@@ -389,6 +389,14 @@ class Store:
         params.append(limit)
         return self.q(sql, params)
 
+    def user_notes(self, user_id: int) -> list[sqlite3.Row]:
+        """Every note of the user with its deck's name and field list."""
+        return self.q(
+            "SELECT n.*, d.name AS deck_name, d.fields AS deck_fields FROM notes n "
+            "JOIN decks d ON d.id=n.deck_id WHERE d.user_id=?",
+            (user_id,),
+        )
+
     def card(self, card_id: int) -> sqlite3.Row | None:
         return self.q1(
             "SELECT c.*, n.fields AS note_fields, n.deck_id AS deck_id, d.user_id AS user_id "

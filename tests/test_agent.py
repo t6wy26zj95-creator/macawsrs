@@ -398,3 +398,63 @@ async def test_grade_result_gives_times_when_the_user_asked(agent, llm, store):
     llm.script.append(grade)
     await agent.on_user_message(UID, "everywhere. when does it come back?", NOW)
     assert "this card comes back today at 12:10" in out["r"]
+
+
+async def _deck_with(agent, llm, store, cards):
+    async def make(prompt, t):
+        await t["create_deck"]({"name": "English", "deck_type": "vocabulary"})
+        return "ok"
+
+    llm.script.append(make)
+    await agent.on_user_message(UID, "make a deck", NOW)
+    for word, meaning in cards:
+        async def step(prompt, t, word=word, meaning=meaning):
+            await t["propose_card"]({"deck": "English", "fields": {"word": word, "meaning": meaning}})
+            return "ok"
+
+        llm.script.append(step)
+        actions = await agent.on_user_message(UID, f"add {word}", NOW)
+        preview = next(a for a in actions if isinstance(a, Preview))
+        agent.add_proposal(preview.proposal_id, UID)
+
+
+async def test_wrong_answer_matching_another_deck_card_is_pointed_out(agent, llm, store):
+    await _deck_with(
+        agent,
+        llm,
+        store,
+        [
+            ("recumbent", "lying down; reclining"),
+            ("mottled", "marked with spots or smears of colour"),
+            ("ubiquitous", "present everywhere"),
+        ],
+    )
+    recumbent = next(c for c in store.user_cards(UID) if "recumbent" in c["note_fields"])
+    mottled = next(c for c in store.user_cards(UID) if "mottled" in c["note_fields"])
+    store.update_state(UID, active_card_id=recumbent["id"], asked_at=NOW.isoformat())
+
+    async def grade(prompt, t):
+        assert '"mottled" = marked with spots' in prompt
+        assert "ubiquitous\" =" not in prompt
+        out = await t["grade_card"]({"card_id": recumbent["id"], "rating": "Again", "reason": "mixed up"})
+        assert "mottled" not in out  # the matched card isn't asked next
+        return "Not quite: that's mottled from your deck. Recumbent means lying down."
+
+    llm.script.append(grade)
+    await agent.on_user_message(UID, "It means to have spots of various kinds of colors", NOW)
+    # Its word was just shown next to its meaning, so it isn't a fair question today.
+    assert store.card(mottled["id"])["buried_until"] is not None
+
+
+async def test_no_lookalike_hint_for_unrelated_answer(agent, llm, store):
+    await _deck_with(agent, llm, store, [("recumbent", "lying down"), ("mottled", "marked with spots of colour")])
+    recumbent = next(c for c in store.user_cards(UID) if "recumbent" in c["note_fields"])
+    store.update_state(UID, active_card_id=recumbent["id"], asked_at=NOW.isoformat())
+
+    async def grade(prompt, t):
+        assert "matches (found by word overlap" not in prompt
+        await t["grade_card"]({"card_id": recumbent["id"], "rating": "Good", "reason": "right"})
+        return "Yes!"
+
+    llm.script.append(grade)
+    await agent.on_user_message(UID, "lying down", NOW)
