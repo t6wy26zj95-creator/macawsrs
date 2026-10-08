@@ -16,6 +16,15 @@ class Config:
     llm_provider: str
     claude_model: str | None
     log_level: str
+    # People who may use the bot on the free model only (never Claude).
+    guest_ids: frozenset[int] = frozenset()
+    free_api_key: str | None = None
+    free_base_url: str = "https://api.groq.com/openai/v1"
+    free_model: str = "openai/gpt-oss-120b"
+
+    @property
+    def allowed_ids(self) -> frozenset[int]:
+        return self.owner_ids | self.guest_ids
 
 
 def _parse_ids(raw: str) -> frozenset[int]:
@@ -42,4 +51,9 @@ def load_config() -> Config:
         llm_provider=os.environ.get("LLM_PROVIDER", "claude"),
         claude_model=os.environ.get("CLAUDE_MODEL") or None,
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
+        # An ID in both lists counts as an owner.
+        guest_ids=_parse_ids(os.environ.get("GUEST_IDS", "")) - owners,
+        free_api_key=os.environ.get("FREE_LLM_API_KEY", "").strip() or None,
+        free_base_url=os.environ.get("FREE_LLM_BASE_URL") or "https://api.groq.com/openai/v1",
+        free_model=os.environ.get("FREE_LLM_MODEL") or "openai/gpt-oss-120b",
     )

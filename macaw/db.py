@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS users (
     max_reminders       INTEGER NOT NULL DEFAULT 4,
     first_reminder_min  INTEGER NOT NULL DEFAULT 60,
     desired_retention   REAL NOT NULL DEFAULT 0.9,
+    llm                 TEXT,                         -- 'claude' or 'free'; NULL = default for the user
     created_at          TEXT NOT NULL
 );
 
@@ -113,6 +114,23 @@ CREATE TABLE IF NOT EXISTS conv_state (
     pending_input        TEXT,                         -- JSON, e.g. {"kind": "rename_deck", "deck_id": 3}
     llm_backoff_until    TEXT
 );
+
+-- Friends who joined through an invite link. They use the free model only.
+CREATE TABLE IF NOT EXISTS guests (
+    user_id     INTEGER PRIMARY KEY,
+    name        TEXT,                                  -- Telegram name when they joined
+    invited_by  INTEGER NOT NULL,
+    added_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS invites (
+    code        TEXT PRIMARY KEY,
+    created_by  INTEGER NOT NULL,
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL,
+    used_by     INTEGER,
+    used_at     TEXT
+);
 """
 
 
@@ -137,6 +155,12 @@ class Store:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {r["name"] for r in self.q("PRAGMA table_info(users)")}
+        if "llm" not in cols:
+            self.x("ALTER TABLE users ADD COLUMN llm TEXT")
 
     # ---------- generic helpers ----------
 
@@ -188,6 +212,40 @@ class Store:
         cols = ", ".join(f"{k}=?" for k in fields)
         self.x(f"UPDATE users SET {cols} WHERE id=?", (*fields.values(), user_id))
 
+    # ---------- guests and invites ----------
+
+    def is_guest(self, user_id: int) -> bool:
+        return self.q1("SELECT 1 FROM guests WHERE user_id=?", (user_id,)) is not None
+
+    def guests(self) -> list[sqlite3.Row]:
+        return self.q("SELECT * FROM guests ORDER BY added_at")
+
+    def remove_guest(self, user_id: int) -> bool:
+        return self.conn.execute("DELETE FROM guests WHERE user_id=?", (user_id,)).rowcount > 0
+
+    def create_invite(self, code: str, created_by: int, expires_at: datetime) -> None:
+        self.x(
+            "INSERT INTO invites(code, created_by, created_at, expires_at) VALUES (?,?,?,?)",
+            (code, created_by, iso(utcnow()), iso(expires_at)),
+        )
+
+    def redeem_invite(self, code: str, user_id: int, name: str | None = None, now: datetime | None = None) -> int | None:
+        """Use a one-time invite: the user becomes a guest. Returns who invited
+        them, or None if the code is unknown, already used or expired."""
+        now = now or utcnow()
+        claimed = self.conn.execute(
+            "UPDATE invites SET used_by=?, used_at=? WHERE code=? AND used_by IS NULL AND expires_at>?",
+            (user_id, iso(now), code, iso(now)),
+        ).rowcount
+        if not claimed:
+            return None
+        inviter = self.q1("SELECT created_by FROM invites WHERE code=?", (code,))["created_by"]
+        self.x(
+            "INSERT OR IGNORE INTO guests(user_id, name, invited_by, added_at) VALUES (?,?,?,?)",
+            (user_id, name, inviter, iso(now)),
+        )
+        return inviter
+
     # ---------- conversation state ----------
 
     def state(self, user_id: int) -> sqlite3.Row:
@@ -226,9 +284,11 @@ class Store:
         return list(reversed(rows))
 
     def prune_messages(self, keep: int = 500) -> None:
+        """Keep each user's latest messages, so one chatty user can't trim another's history."""
         self.x(
-            "DELETE FROM messages WHERE id NOT IN "
-            "(SELECT id FROM messages ORDER BY id DESC LIMIT ?)",
+            "DELETE FROM messages WHERE id IN (SELECT id FROM "
+            "(SELECT id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id DESC) AS n FROM messages) "
+            "WHERE n > ?)",
             (keep,),
         )
 

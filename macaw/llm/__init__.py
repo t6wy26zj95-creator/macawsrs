@@ -1,5 +1,6 @@
-"""Language model providers. The bot talks to one `LLMProvider`; Claude via the
-Pro subscription is the default, and others can be added beside it."""
+"""Language model providers. Each turn runs on one `LLMProvider`: Claude via the
+Pro subscription for owners, or the free model (any OpenAI-style API, Groq by
+default) for guests and for owners who switch to it."""
 
 from __future__ import annotations
 
@@ -31,3 +32,37 @@ def make_provider(name: str, model: str | None = None) -> LLMProvider:
 
         return ClaudeCodeProvider(model=model)
     raise SystemExit(f"Unknown LLM_PROVIDER {name!r}")
+
+
+CLAUDE = "claude"
+FREE = "free"
+
+
+class Models:
+    """Picks the model for each user. Only owners may ever use Claude (it runs on
+    the owner's own Pro subscription); guests always get the free model."""
+
+    def __init__(self, owner_ids: frozenset[int], claude: LLMProvider, free: LLMProvider | None):
+        self.owner_ids = owner_ids
+        self.claude = claude
+        self.free = free
+
+    def name_for(self, user: dict[str, Any]) -> str:
+        if user["id"] in self.owner_ids and user.get("llm") != FREE:
+            return CLAUDE
+        return FREE
+
+    def for_user(self, user: dict[str, Any]) -> LLMProvider:
+        if self.name_for(user) == CLAUDE:
+            return self.claude
+        if self.free is None:
+            raise LLMError("the free model is not set up (FREE_LLM_API_KEY is empty)")
+        return self.free
+
+
+def make_free_provider(api_key: str | None, base_url: str, model: str) -> LLMProvider | None:
+    if not api_key:
+        return None
+    from .openai_compat import OpenAICompatProvider
+
+    return OpenAICompatProvider(base_url, api_key, model)
