@@ -65,6 +65,7 @@ class Preview:
 @dataclass
 class RatingNote:
     log_id: int
+    offer_next: bool = False  # the session paused with cards still due: show a Next card button
 
 
 @dataclass
@@ -149,6 +150,31 @@ class Agent:
         event = (
             "It's time to bring up the active card. Ask about it naturally, as part of the "
             "conversation, without revealing the answer."
+        )
+        return await self._run(turn, event)
+
+    async def ask_now(self, user_id: int, now: datetime | None = None) -> list[Action]:
+        """The user tapped Next card: that is asking for a card right now, so the
+        timer's later slot doesn't hold it back."""
+        now = now or datetime.now(timezone.utc)
+        self.store.log_message(user_id, "user", "(tapped Next card)")
+        self.store.update_state(user_id, last_user_at=iso(now), reminders_streak=0)
+        turn = self._turn(user_id, now)
+        st = self.store.state(user_id)
+        if st["active_card_id"] and self.store.card(st["active_card_id"]):
+            event = (
+                "The user tapped the Next card button, but the active card is still open. "
+                "Ask it again briefly, without revealing the answer."
+            )
+            return await self._run(turn, event)
+        self.store.update_state(user_id, session_count=0, burst=0)
+        if self._activate_next(turn) is None:
+            text = "Nothing else is due right now."
+            self.store.log_message(user_id, "bot", text)
+            return [Text(text)]
+        event = (
+            "The user tapped the Next card button. Ask the active card now, naturally, "
+            "without revealing the answer."
         )
         return await self._run(turn, event)
 
@@ -373,7 +399,7 @@ class Agent:
         s = f"#{card['id']} in deck \"{deck['name']}\" ({deck['deck_type']}, {direction}, {status})\n"
         s += f"  Ask about: {prompt}"
         if with_answer:
-            s += f"\n  Answer (secret until they reply): {answer}"
+            s += f"\n  Answer (secret until they reply; the user can't see any of this card): {answer}"
         return s
 
     def _context(self, turn: Turn) -> str:
@@ -666,6 +692,9 @@ class Agent:
                     )
             gap = self._end_session(turn)
             left = len(srs.due_today(store, turn.user, turn.now))
+            if srs.due_queue(store, turn.user, turn.now):
+                note = next(a for a in turn.actions if isinstance(a, RatingNote) and a.log_id == log_id)
+                note.offer_next = True
             if left:
                 when = ""
                 if turn.show_times:

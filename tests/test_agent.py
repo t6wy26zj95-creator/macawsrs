@@ -458,3 +458,61 @@ async def test_no_lookalike_hint_for_unrelated_answer(agent, llm, store):
 
     llm.script.append(grade)
     await agent.on_user_message(UID, "lying down", NOW)
+
+
+async def test_card_brief_says_the_user_cannot_see_the_card(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    llm.script.append(lambda p, t: _ret("What does ubiquitous mean?"))
+    await agent.ask_next(UID, NOW)
+    assert "the user can't see any of this card" in llm.prompts[-1]
+
+
+async def test_paused_session_offers_a_next_card_button(agent, llm, store):
+    from macaw.bot import render
+
+    await _make_deck_with_card(agent, llm)
+    await _make_deck_with_card(agent, llm, "serendipity", "happy accident")
+    store.update_user(UID, cards_per_session=1)
+    llm.script.append(lambda p, t: _ret("What does ubiquitous mean?"))
+    await agent.ask_next(UID, NOW)
+    card_id = store.state(UID)["active_card_id"]
+
+    async def grade(prompt, t):
+        out = await t["grade_card"]({"card_id": card_id, "rating": "Good"})
+        assert "Session done" in out
+        return "Yes!"
+
+    llm.script.append(grade)
+    actions = await agent.on_user_message(UID, "everywhere", NOW)
+    note = next(a for a in actions if isinstance(a, RatingNote))
+    assert note.offer_next
+    _, kb = render.rating_note(store, note.log_id, NOW, offer_next=True)
+    assert render.has_next(kb)
+    assert store.state(UID)["next_ask_at"] > "2026-10-07T10:00"  # the timer had it for later
+
+    # Tapping the button counts as asking now, so the timer doesn't hold it back.
+    async def ask(prompt, t):
+        assert "tapped the Next card button" in prompt
+        return "And serendipity?"
+
+    llm.script.append(ask)
+    actions = await agent.ask_now(UID, NOW)
+    assert actions[0].text == "And serendipity?"
+    assert store.state(UID)["active_card_id"] not in (None, card_id)
+
+
+async def test_no_next_card_button_when_nothing_is_due(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    llm.script.append(lambda p, t: _ret("What does ubiquitous mean?"))
+    await agent.ask_next(UID, NOW)
+    card_id = store.state(UID)["active_card_id"]
+
+    async def grade(prompt, t):
+        await t["grade_card"]({"card_id": card_id, "rating": "Good"})
+        return "Yes!"
+
+    llm.script.append(grade)
+    actions = await agent.on_user_message(UID, "everywhere", NOW)
+    assert not next(a for a in actions if isinstance(a, RatingNote)).offer_next
+    actions = await agent.ask_now(UID, NOW)
+    assert actions == [Text("Nothing else is due right now.")]

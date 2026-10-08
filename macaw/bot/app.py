@@ -65,7 +65,7 @@ class App:
                 msg = await self.bot.send_message(chat_id, text, reply_markup=kb, parse_mode=ParseMode.HTML)
                 self.store.update_proposal(a.proposal_id, message_id=msg.message_id)
             elif isinstance(a, RatingNote):
-                text, kb = render.rating_note(self.store, a.log_id)
+                text, kb = render.rating_note(self.store, a.log_id, offer_next=a.offer_next)
                 await self.bot.send_message(chat_id, text, reply_markup=kb, parse_mode=ParseMode.HTML)
             elif isinstance(a, ConfirmDelete):
                 text, kb = render.confirm_delete(self.store, a.note_id)
@@ -287,9 +287,17 @@ class App:
                 user["id"], "note", f"user changed the grade to {srs.RATING_NAMES[int(rating)]}"
             )
             await c.answer("Updated")
-            text, kb = render.rating_note(self.store, int(log_id))
+            offer = render.has_next(c.message.reply_markup)
+            text, kb = render.rating_note(self.store, int(log_id), offer_next=offer)
             with contextlib.suppress(TelegramBadRequest):
                 await c.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+        @r.callback_query(F.data == render.NEXT)
+        async def next_cb(c: CallbackQuery):
+            if not self._allowed(c.from_user.id):
+                return
+            await c.answer()
+            await self._next_now(c)
 
         @r.callback_query(F.data.startswith("x:"))
         async def delete_cb(c: CallbackQuery):
@@ -389,6 +397,17 @@ class App:
         uid = m.from_user.id
         async with self.lock(uid):
             await self.run_llm(uid, m.chat.id, lambda: self.agent.on_user_message(uid, text), notify=True)
+
+    async def _next_now(self, c: CallbackQuery) -> None:
+        uid = c.from_user.id
+        # The button is used up: keep only the grade buttons on that note.
+        kb = c.message.reply_markup
+        if kb:
+            rows = [row for row in kb.inline_keyboard if not any(b.callback_data == render.NEXT for b in row)]
+            with contextlib.suppress(TelegramBadRequest):
+                await c.message.edit_reply_markup(reply_markup=Kb(inline_keyboard=rows))
+        async with self.lock(uid):
+            await self.run_llm(uid, c.message.chat.id, lambda: self.agent.ask_now(uid), notify=True)
 
     def _delete_note(self, user_id: int, note_id: int) -> None:
         st = self.store.state(user_id)
