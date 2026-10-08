@@ -66,7 +66,17 @@ class App:
                 self.store.update_proposal(a.proposal_id, message_id=msg.message_id)
             elif isinstance(a, RatingNote):
                 text, kb = render.rating_note(self.store, a.log_id, offer_next=a.offer_next)
-                await self.bot.send_message(chat_id, text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                old = self.store.review(a.log_id)["message_id"] if a.changed else None
+                if old:
+                    try:
+                        await self.bot.edit_message_text(
+                            text=text, chat_id=chat_id, message_id=old, reply_markup=kb, parse_mode=ParseMode.HTML
+                        )
+                        continue
+                    except TelegramBadRequest:
+                        pass  # too old or gone: show the new grade as a fresh message
+                msg = await self.bot.send_message(chat_id, text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                self.store.set_review_message(a.log_id, msg.message_id)
             elif isinstance(a, ConfirmDelete):
                 text, kb = render.confirm_delete(self.store, a.note_id)
                 await self.bot.send_message(chat_id, text, reply_markup=kb, parse_mode=ParseMode.HTML)

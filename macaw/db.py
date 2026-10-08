@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS review_log (
     before       TEXT NOT NULL,                        -- JSON card scheduling state before
     after        TEXT NOT NULL,                        -- JSON card scheduling state after
     source       TEXT NOT NULL,                        -- 'claude' or 'user'
-    reason       TEXT
+    reason       TEXT,
+    message_id   INTEGER                               -- Telegram message showing the grade
 );
 CREATE INDEX IF NOT EXISTS review_log_card ON review_log(card_id);
 CREATE INDEX IF NOT EXISTS review_log_time ON review_log(reviewed_at);
@@ -176,6 +177,9 @@ class Store:
             self.x("ALTER TABLE notes ADD COLUMN guid TEXT")
         if "anki" not in note_cols:
             self.x("ALTER TABLE notes ADD COLUMN anki TEXT")
+        review_cols = {r["name"] for r in self.q("PRAGMA table_info(review_log)")}
+        if "message_id" not in review_cols:
+            self.x("ALTER TABLE review_log ADD COLUMN message_id INTEGER")
 
     # ---------- generic helpers ----------
 
@@ -471,10 +475,25 @@ class Store:
     def review(self, log_id: int) -> sqlite3.Row | None:
         return self.q1("SELECT * FROM review_log WHERE id=?", (log_id,))
 
-    def update_review(self, log_id: int, rating: int, after: dict, source: str) -> None:
+    def update_review(
+        self, log_id: int, rating: int, after: dict, source: str, reason: str | None = None
+    ) -> None:
         self.x(
-            "UPDATE review_log SET rating=?, after=?, source=? WHERE id=?",
-            (rating, json.dumps(after), source, log_id),
+            "UPDATE review_log SET rating=?, after=?, source=?, reason=COALESCE(?, reason) WHERE id=?",
+            (rating, json.dumps(after), source, reason, log_id),
+        )
+
+    def set_review_message(self, log_id: int, message_id: int) -> None:
+        self.x("UPDATE review_log SET message_id=? WHERE id=?", (message_id, log_id))
+
+    def last_graded(self, user_id: int, since: datetime) -> sqlite3.Row | None:
+        """The user's most recent review since a time, if it is still its card's latest."""
+        return self.q1(
+            "SELECT r.* FROM review_log r JOIN cards c ON c.id=r.card_id JOIN notes n ON n.id=c.note_id "
+            "JOIN decks d ON d.id=n.deck_id WHERE d.user_id=? AND r.reviewed_at>=? "
+            "AND r.id=(SELECT MAX(id) FROM review_log WHERE card_id=r.card_id) "
+            "ORDER BY r.id DESC LIMIT 1",
+            (user_id, iso(since)),
         )
 
     def last_review_id(self, card_id: int) -> int | None:
