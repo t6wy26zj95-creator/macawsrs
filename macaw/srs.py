@@ -241,6 +241,39 @@ def upcoming(store: Store, user: Mapping[str, Any], now: datetime, days: int = 7
     return [(first + timedelta(days=i), n) for i, n in sorted(counts.items())]
 
 
+def comes_back(user: Mapping[str, Any], card: Mapping[str, Any], now: datetime) -> str:
+    """When the user will actually see this card, in the same day rule the timer uses.
+
+    Review cards count by study day (like Anki): anything due before the next
+    rollover belongs to that study day, so "Fri 00:08" really means "from 08:00
+    on Thursday". Learning cards come back at their exact time.
+    """
+    if card["state"] == NEW:
+        return "not studied yet (comes up as a new card)"
+    due = parse(card["due"])
+    buried = parse(card["buried_until"])
+    if buried and (due is None or buried > due):
+        due = buried
+    if due is None:
+        return "unknown"
+    tz = tz_of(user)
+    if card["state"] in (1, 3) and not buried:
+        if due <= now:
+            return "now"
+        when = due.astimezone(tz)
+        if due < day_start(user, now) + timedelta(days=1):
+            return f"today at {when:%H:%M}"
+        return f"{when:%a %d %b} at {when:%H:%M}"
+    shown = day_start(user, due)
+    today = day_start(user, now)
+    if shown <= today:
+        return "today (it's due now)"
+    start = shown.astimezone(tz).strftime("%H:%M")
+    if shown == today + timedelta(days=1):
+        return f"tomorrow ({shown.astimezone(tz):%a}) from {start}"
+    return f"{shown.astimezone(tz):%a %d %b} from {start}"
+
+
 def next_learning_due(store: Store, user: Mapping[str, Any], now: datetime) -> datetime | None:
     """Earliest future due time of a learning/relearning card (wrong answers coming back)."""
     times = [

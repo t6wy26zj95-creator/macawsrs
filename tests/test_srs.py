@@ -127,3 +127,16 @@ def test_upcoming_counts_scheduled_reviews_per_day(store, user):
     assert sum(n for _, n in ahead) == 2
     assert all(d >= srs.next_day_start(user, now) for d, _ in ahead)
     assert srs.upcoming(store, user, now, days=1) == []
+
+
+def test_comes_back_uses_the_study_day_rule(store, user):
+    user = {**user, "timezone": "Europe/Moscow", "quiet_start": "00:00", "quiet_end": "08:00"}
+    make_deck(store, 1)
+    card = dict(store.user_cards(UID)[0])
+    now = at("2026-10-07 21:08")  # Thu 00:08 in Moscow, still Wednesday's study day
+    card.update(state=2, due="2026-10-08T21:08:00+00:00", buried_until=None)  # Fri 00:08 Moscow
+    assert srs.comes_back(user, card, now) == "tomorrow (Thu) from 08:00"
+    card.update(state=1, due="2026-10-07T21:18:00+00:00")
+    assert srs.comes_back(user, card, now) == "today at 00:18"
+    card.update(state=0)
+    assert srs.comes_back(user, card, now).startswith("not studied yet")
