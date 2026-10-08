@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS notes (
     deck_id     INTEGER NOT NULL REFERENCES decks(id) ON DELETE CASCADE,
     fields      TEXT NOT NULL,                         -- JSON object field -> value
     sort_key    TEXT NOT NULL,                         -- normalized first field, for duplicates
+    guid        TEXT,                                  -- Anki's note id, kept for import/export
+    anki        TEXT,                                  -- JSON: the note as Anki had it (note type, raw fields, tags)
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS notes_deck_key ON notes(deck_id, sort_key);
@@ -123,6 +125,14 @@ CREATE TABLE IF NOT EXISTS guests (
     added_at    TEXT NOT NULL
 );
 
+-- Anki note types of imported notes, so exports update the same notes in Anki.
+CREATE TABLE IF NOT EXISTS anki_notetypes (
+    user_id  INTEGER NOT NULL,
+    id       INTEGER NOT NULL,
+    data     TEXT NOT NULL,                            -- JSON: name, type, field names, templates, css
+    PRIMARY KEY (user_id, id)
+);
+
 CREATE TABLE IF NOT EXISTS invites (
     code        TEXT PRIMARY KEY,
     created_by  INTEGER NOT NULL,
@@ -161,6 +171,11 @@ class Store:
         cols = {r["name"] for r in self.q("PRAGMA table_info(users)")}
         if "llm" not in cols:
             self.x("ALTER TABLE users ADD COLUMN llm TEXT")
+        note_cols = {r["name"] for r in self.q("PRAGMA table_info(notes)")}
+        if "guid" not in note_cols:
+            self.x("ALTER TABLE notes ADD COLUMN guid TEXT")
+        if "anki" not in note_cols:
+            self.x("ALTER TABLE notes ADD COLUMN anki TEXT")
 
     # ---------- generic helpers ----------
 

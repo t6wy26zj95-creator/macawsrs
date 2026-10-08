@@ -301,3 +301,31 @@ def describe_interval(due: datetime, now: datetime) -> str:
     if days < 365:
         return n(round(days / 30), "month")
     return f"{days / 365:.1f} years"
+
+
+# ---------- deck stats ----------
+
+MATURE_DAYS = 21
+
+
+def empty_stats() -> dict[str, int]:
+    return {"new": 0, "learning": 0, "young": 0, "mature": 0, "due": 0}
+
+
+def deck_stats(store: Store, user: Mapping[str, Any], now: datetime) -> dict[int, dict[str, int]]:
+    """Per deck, how many cards are new, learning (or relearning), young (interval under
+    21 days), mature (21 days or more, as in Anki), and still due today."""
+    out: dict[int, dict[str, int]] = {}
+    for c in store.user_cards(user["id"]):
+        s = out.setdefault(c["deck_id"], empty_stats())
+        if c["state"] == NEW:
+            s["new"] += 1
+        elif c["state"] in (1, 3):
+            s["learning"] += 1
+        else:
+            due, last = parse(c["due"]), parse(c["last_review"])
+            ivl = (due - last).days if due and last else 0
+            s["mature" if ivl >= MATURE_DAYS else "young"] += 1
+    for c in due_today(store, user, now):
+        out.setdefault(c["deck_id"], empty_stats())["due"] += 1
+    return out

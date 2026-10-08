@@ -11,8 +11,11 @@ Macaw is a Telegram bot for spaced repetition that talks instead of flipping fla
 - **Reminders:** if you go quiet on a question, reminders follow with doubling gaps (1 h, 2 h, 4 h ...), up to 4 a day, getting playfully annoyed. Nothing is sent during quiet hours (default 00:00 to 08:00), but you can always study at night if you write first.
 - **/decks:** one message with all decks; tap through card lists, daily limits, template, reverse cards, rename and delete. Every tap edits the same message.
 - **/settings** shows timezone, quiet hours and reminder settings; change them by telling the bot.
+- **Anki import:** send an .apkg (or .colpkg) file in the chat. Buttons ask whether it becomes a new deck or merges into one of yours, and if merging, whether it replaces that deck or adds on top (cards already there are skipped). Progress comes along: FSRS memory state when Anki has it, otherwise rebuilt from the review history, and due dates stay what Anki had. If many cards are overdue (a deck left alone for a year), they can be spread over the next days, most likely remembered first. Suspended cards, audio and images are left out; cloze notes become one question with gaps.
+- **Anki export:** /export or "Export to Anki" in /decks sends an .apkg with scheduling and review history, for Anki, AnkiMobile and AnkiDroid. Imported notes go back as their original note type, with Anki's formatting and media kept for fields you didn't change, so Anki updates its own notes instead of making copies. Anki never takes over progress for cards it already has; to move the progress from the bot into Anki, delete the deck in Anki first, then import.
+- **Deck stats:** /decks shows per deck how many cards are new, learning, young and mature (interval of 21 days or more, as in Anki), and lists the cards still due today.
 
-Planned next: .apkg import/export for Anki and AnkiMobile, and an ebook reader.
+Planned next: an ebook reader.
 
 ## How it is built
 
@@ -23,6 +26,7 @@ Planned next: .apkg import/export for Anki and AnkiMobile, and an ebook reader.
 | FSRS scheduling, due queue, day boundaries | `macaw/srs.py` |
 | Pacing and reminder rules | `macaw/pacing.py` |
 | Answer-leak check | `macaw/leak.py` |
+| Anki .apkg reading and writing | `macaw/apkg.py`, chat flow in `macaw/bot/transfer.py` |
 | Storage (SQLite) | `macaw/db.py` |
 | Claude via your Pro subscription | `macaw/llm/claude.py` |
 | Free model (Gemini, Groq or any OpenAI-style API) | `macaw/llm/openai_compat.py` |
