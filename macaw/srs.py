@@ -82,7 +82,8 @@ def grade(store: Store, user: Mapping[str, Any], card_id: int, rating: int, sour
     return store.add_review(card_id, rating, when, before, after, source, reason)
 
 
-def regrade(store: Store, user: Mapping[str, Any], log_id: int, rating: int) -> dict[str, Any]:
+def regrade(store: Store, user: Mapping[str, Any], log_id: int, rating: int,
+            source: str = "user", reason: str | None = None) -> dict[str, Any]:
     """Change the rating of a past review, like Anki's undo + answer again.
 
     Only the latest review of a card can be changed; later reviews would be
@@ -98,7 +99,7 @@ def regrade(store: Store, user: Mapping[str, Any], log_id: int, rating: int) -> 
     before = json.loads(log["before"])
     after = next_schedule(scheduler_for(user), log["card_id"], before, rating, parse(log["reviewed_at"]))
     store.set_card_schedule(log["card_id"], after)
-    store.update_review(log_id, rating, after, "user")
+    store.update_review(log_id, rating, after, source, reason)
     return after
 
 

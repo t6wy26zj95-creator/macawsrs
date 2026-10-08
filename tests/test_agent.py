@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import pytest
 
-from macaw.agent import Agent, ConfirmDelete, Preview, RatingNote, Text
+from macaw.agent import REGRADE_WINDOW, Agent, ConfirmDelete, Preview, RatingNote, Text
 from macaw.bot.app import App
 from macaw.config import Config
 
@@ -562,3 +562,82 @@ async def test_model_can_grade_a_due_card_it_asked_instead_of_the_active_one(age
     llm.script.append(grade)
     actions = await agent.on_user_message(UID, "no idea", NOW + timedelta(minutes=1))
     assert any(isinstance(a, RatingNote) for a in actions)
+
+
+# ---------- disputed grades ----------
+
+
+async def _graded_hard(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    llm.script.append(lambda p, t: _ret("What does 'ubiquitous' mean?"))
+    await agent.ask_next(UID, NOW)
+    card_id = store.state(UID)["active_card_id"]
+
+    async def grade(prompt, t):
+        await t["grade_card"]({"card_id": card_id, "rating": "Hard", "reason": "core idea—but not all"})
+        return "Close—it means present everywhere."
+
+    llm.script.append(grade)
+    actions = await agent.on_user_message(UID, "it's everywhere", NOW + timedelta(minutes=1))
+    return card_id, actions
+
+
+async def test_dashes_are_replaced_in_replies_and_reasons(agent, llm, store):
+    _, actions = await _graded_hard(agent, llm, store)
+    assert actions[0].text == "Close, it means present everywhere."
+    note = next(a for a in actions if isinstance(a, RatingNote))
+    assert store.review(note.log_id)["reason"] == "core idea, but not all"
+
+
+async def test_bot_changes_its_grade_when_the_user_disputes_it(agent, llm, store):
+    card_id, actions = await _graded_hard(agent, llm, store)
+    log_id = next(a for a in actions if isinstance(a, RatingNote)).log_id
+
+    async def regrade(prompt, t):
+        assert f"Last grade: card #{card_id} (ubiquitous) graded Hard by you" in prompt
+        out = await t["change_grade"]({"card_id": card_id, "rating": "Good", "reason": "you had the meaning"})
+        assert out.startswith("Changed from Hard to Good")
+        return "Fair point, it's Good now."
+
+    llm.script.append(regrade)
+    actions = await agent.on_user_message(UID, "that was right though, why Hard?", NOW + timedelta(minutes=2))
+    note = next(a for a in actions if isinstance(a, RatingNote))
+    assert note.log_id == log_id and note.changed
+    r = store.review(log_id)
+    assert (r["rating"], r["source"], r["reason"]) == (3, "claude", "you had the meaning")
+    assert store.last_review_id(card_id) == log_id  # changed in place, not graded twice
+
+
+async def test_changed_grade_edits_the_grade_message(agent, llm, store):
+    app = _app(store, agent)
+    edited = []
+
+    async def edit_message_text(**kw):
+        edited.append(kw["message_id"])
+
+    app.bot.edit_message_text = edit_message_text
+    card_id, actions = await _graded_hard(agent, llm, store)
+    await app.send_actions(UID, actions)
+    log_id = next(a for a in actions if isinstance(a, RatingNote)).log_id
+    mid = store.review(log_id)["message_id"]
+    assert mid
+
+    llm.script.append(lambda p, t: t["change_grade"]({"card_id": card_id, "rating": "Good", "reason": "ok"}))
+    actions = await agent.on_user_message(UID, "unfair", NOW + timedelta(minutes=2))
+    sent = len(app.bot.sent)
+    await app.send_actions(UID, [a for a in actions if isinstance(a, RatingNote)])
+    assert edited == [mid] and len(app.bot.sent) == sent
+
+
+async def test_only_the_latest_grade_can_be_changed(agent, llm, store):
+    card_id, _ = await _graded_hard(agent, llm, store)
+    later = NOW + REGRADE_WINDOW + timedelta(minutes=5)
+
+    async def regrade(prompt, t):
+        assert "Last grade:" not in prompt
+        with pytest.raises(ValueError):
+            await t["change_grade"]({"card_id": card_id, "rating": "Good", "reason": "x"})
+        return "ok"
+
+    llm.script.append(regrade)
+    await agent.on_user_message(UID, "hm", later)

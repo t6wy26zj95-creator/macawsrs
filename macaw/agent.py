@@ -36,8 +36,14 @@ log = logging.getLogger(__name__)
 EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D]")
 
 
+# Nick doesn't like em and en dashes used as punctuation; commas read more naturally.
+DASH = re.compile(r"\s*[\u2014\u2013]\s*")
+
+
 def strip_emoji(text: str) -> str:
-    return re.sub(r"[ \t]{2,}", " ", EMOJI.sub("", text)).strip()
+    text = DASH.sub(", ", EMOJI.sub("", text))
+    text = re.sub(r",\s*([,.!?;:])", r"\1", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
 # Nick's rule: the bot never brings up when cards come back unless asked. Some
@@ -67,6 +73,7 @@ class Preview:
 class RatingNote:
     log_id: int
     offer_next: bool = False  # the session paused with cards still due: show a Next card button
+    changed: bool = False  # an earlier grade was changed: update its message instead of a new one
 
 
 @dataclass
@@ -96,6 +103,8 @@ def _jsonschema(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
 # Keep each Claude turn small so long chats don't eat into the Pro usage limits:
 # only the latest messages go in, long ones are shortened, and the due list is capped.
 HISTORY_MESSAGES = 16
+# How long after grading a card its grade can still be changed in chat.
+REGRADE_WINDOW = timedelta(hours=6)
 MAX_MESSAGE_CHARS = 500
 DUE_LIST_LIMIT = 15
 
@@ -455,6 +464,19 @@ class Agent:
         else:
             lines.append("ACTIVE CARD: none. Do not quiz the user on your own; call next_card if they want one.")
 
+        last = self.store.last_graded(uid, now - REGRADE_WINDOW)
+        if last is not None:
+            card = self.store.card(last["card_id"])
+            note = self.store.note(card["note_id"])
+            prompt, _ = card_sides(deck_fields(self.store.deck(note["deck_id"])), note_fields(note["fields"]), card["ord"])
+            by = "you" if last["source"] == "claude" else "the user, with the buttons"
+            lines.append(
+                f"Last grade: card #{card['id']} ({headword(prompt)[0]}) graded "
+                f"{srs.RATING_NAMES[last['rating']]} by {by}"
+                + (f" ({last['reason']})" if last["reason"] else "")
+                + ". If the user disputes it and you agree, call change_grade."
+            )
+
         lines.append(self._timer_line(turn, st, bool(active and self.store.card(active)), queue))
 
         others = [c for c in queue if c["id"] != active]
@@ -685,7 +707,8 @@ class Agent:
             rating = srs.RATING_BY_NAME.get(str(args["rating"]).lower())
             if rating is None:
                 raise ValueError("rating must be Again, Hard, Good or Easy")
-            log_id = srs.grade(store, turn.user, card_id, rating, "claude", args.get("reason"), turn.now)
+            reason = strip_emoji(args.get("reason") or "") or None
+            log_id = srs.grade(store, turn.user, card_id, rating, "claude", reason, turn.now)
             tz = srs.tz_of(turn.user)
             back = (
                 f"(The user asked about timing: this card comes back {srs.comes_back(turn.user, store.card(card_id), turn.now)}.)"
@@ -721,6 +744,32 @@ class Agent:
                     f"{left} cards left today; the code brings up the next one on its own{when}."
                 )
             return f"Graded {srs.RATING_NAMES[rating]}. {back} That was the last card due for now. Do not ask another."
+
+        async def change_grade(args):
+            card_id = int(args["card_id"])
+            self._owned_card(uid, card_id)
+            last = store.last_graded(uid, turn.now - REGRADE_WINDOW)
+            if last is None or last["card_id"] != card_id:
+                raise ValueError(
+                    "Only the most recent grade can be changed. Tell the user to tap the grade they "
+                    "want on that card's grade message."
+                )
+            rating = srs.RATING_BY_NAME.get(str(args["rating"]).lower())
+            if rating is None:
+                raise ValueError("rating must be Again, Hard, Good or Easy")
+            old = srs.RATING_NAMES[last["rating"]]
+            if rating == last["rating"]:
+                return f"It is already graded {old}; nothing changed."
+            reason = strip_emoji(args.get("reason") or "") or None
+            srs.regrade(store, turn.user, last["id"], rating, "claude", reason)
+            st = store.state(uid)
+            offer = not st["active_card_id"] and bool(srs.due_queue(store, turn.user, turn.now))
+            turn.actions.append(RatingNote(last["id"], offer_next=offer, changed=True))
+            store.log_message(uid, "note", f"card #{card_id} regraded {old} -> {srs.RATING_NAMES[rating]}")
+            return (
+                f"Changed from {old} to {srs.RATING_NAMES[rating]}; the grade message now shows it. "
+                "Say so in a few words, without apologizing at length."
+            )
 
         async def postpone_card(args):
             card_id = int(args["card_id"])
@@ -879,6 +928,20 @@ class Agent:
                     ["card_id", "rating", "reason"],
                 ),
                 grade_card,
+            ),
+            ToolSpec(
+                "change_grade",
+                "Change the grade you just gave, when the user disputes it and you agree (or they ask for "
+                "another grade). Only the most recent grade can be changed.",
+                _jsonschema(
+                    {
+                        "card_id": INT,
+                        "rating": {"type": "string", "enum": ["Again", "Hard", "Good", "Easy"]},
+                        "reason": {"type": "string", "description": "One short line shown to the user: why this grade."},
+                    },
+                    ["card_id", "rating", "reason"],
+                ),
+                change_grade,
             ),
             ToolSpec(
                 "postpone_card",
