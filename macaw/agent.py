@@ -454,7 +454,9 @@ class Agent:
                 return "No matching cards."
             out = []
             for r in rows:
-                out.append(f"note #{r['id']} in {r['deck_name']}: {r['fields']}")
+                cards = store.q("SELECT * FROM cards WHERE note_id=? ORDER BY ord", (r["id"],))
+                when = "; ".join(srs.comes_back(turn.user, c, turn.now) for c in cards)
+                out.append(f"note #{r['id']} in {r['deck_name']}: {r['fields']} (comes back: {when})")
             return "\n".join(out)
 
         async def propose_card(args):
@@ -526,10 +528,8 @@ class Agent:
                 raise ValueError("rating must be Again, Hard, Good or Easy")
             log_id = srs.grade(store, turn.user, card_id, rating, "claude", args.get("reason"), turn.now)
             tz = srs.tz_of(turn.user)
-            due = parse(store.card(card_id)["due"])
             back = (
-                f"This card itself comes back in {srs.describe_interval(due, turn.now)} "
-                f"({due.astimezone(tz):%a %d %b %H:%M}); the grade note shows this, don't restate a different time."
+                f"(Only if the user asks: this card comes back {srs.comes_back(turn.user, store.card(card_id), turn.now)}.)"
             )
             turn.graded.add(card_id)
             turn.actions.append(RatingNote(log_id))
@@ -551,8 +551,8 @@ class Agent:
                 at = (turn.now + gap).astimezone(tz).strftime("%H:%M")
                 return (
                     f"Graded {srs.RATING_NAMES[rating]}. {back} Session done: do NOT ask another card now. "
-                    f"{left} cards left today; the code brings up the next one at about {at} "
-                    f"(in {srs.describe_interval(turn.now + gap, turn.now)}). Tell the user that time."
+                    f"{left} cards left today; the code brings up the next one at about {at}. "
+                    "Don't mention timing unless the user asks; if they do, give that exact time."
                 )
             return f"Graded {srs.RATING_NAMES[rating]}. {back} That was the last card due for now. Do not ask another."
 

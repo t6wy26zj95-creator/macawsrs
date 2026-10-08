@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import html
-import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from aiogram.types import InlineKeyboardButton as Btn
 from aiogram.types import InlineKeyboardMarkup as Kb
 
 from .. import srs
-from ..db import Store, parse
+from ..db import Store
 from ..templates import deck_fields, note_fields, render_note_html
 
 
@@ -40,19 +39,10 @@ def preview(store: Store, proposal_id: int) -> tuple[str, Kb | None]:
 def rating_note(store: Store, log_id: int, now: datetime | None = None) -> tuple[str, Kb]:
     now = now or datetime.now(timezone.utc)
     r = store.review(log_id)
-    after = json.loads(r["after"])
-    due = parse(after["due"])
     name = srs.RATING_NAMES[r["rating"]]
     who = "You" if r["source"] == "user" else "I"
     reason = f" · {html.escape(r['reason'])}" if r["reason"] and r["source"] != "user" else ""
-    user = store.card_owner(r["card_id"])
-    when = due.astimezone(srs.tz_of(user))
-    # Within a day the clock time says more than the date (a card due at 00:06 is "00:06", not "Thu 08 Oct").
-    day = when.strftime("%H:%M") if due - now < timedelta(hours=20) else when.strftime("%a %d %b")
-    text = (
-        f"<i>{who} rated: <b>{name}</b>{reason}\n"
-        f"This card comes back in {srs.describe_interval(due, now)} ({day})</i>"
-    )
+    text = f"<i>{who} rated: <b>{name}</b>{reason}</i>"
     row = []
     for value, label in srs.RATING_NAMES.items():
         mark = "• " if value == r["rating"] else ""

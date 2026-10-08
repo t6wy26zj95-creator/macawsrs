@@ -358,7 +358,7 @@ async def test_next_card_waits_for_the_timer_unless_user_asked_now(agent, llm, s
     assert store.state(UID)["active_card_id"]
 
 
-async def test_grade_result_and_note_give_real_times(agent, llm, store):
+async def test_grade_result_keeps_timing_quiet_and_note_has_no_time(agent, llm, store):
     from macaw.bot import render
 
     await _make_deck_with_card(agent, llm)
@@ -374,20 +374,8 @@ async def test_grade_result_and_note_give_real_times(agent, llm, store):
 
     llm.script.append(grade)
     actions = await agent.on_user_message(UID, "everywhere", NOW)
-    assert "This card itself comes back in 10 min" in out["r"]
-    assert "the code brings up the next one at about" in out["r"]
+    assert "Only if the user asks: this card comes back today at 12:10" in out["r"]
+    assert "Don't mention timing unless the user asks" in out["r"]
     note = next(a for a in actions if isinstance(a, RatingNote))
     text, _ = render.rating_note(store, note.log_id, NOW)
-    assert "This card comes back in 10 min (12:10)" in text
-
-
-async def test_rating_note_shows_clock_time_across_midnight(agent, llm, store):
-    from macaw.bot import render
-    from macaw import srs
-
-    await _make_deck_with_card(agent, llm)
-    card = store.user_cards(UID)[0]
-    late = at("2026-10-07 21:56")  # 23:56 in Berlin
-    log_id = srs.grade(store, dict(store.get_user(UID)), card["id"], 3, "claude", "ok", late)
-    text, _ = render.rating_note(store, log_id, late)
-    assert "This card comes back in 10 min (00:06)" in text
+    assert text == "<i>I rated: <b>Good</b> · spot on</i>"
