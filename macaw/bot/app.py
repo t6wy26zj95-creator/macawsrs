@@ -6,7 +6,9 @@ import asyncio
 import contextlib
 import logging
 import secrets
+import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -24,6 +26,7 @@ from ..db import Store, iso, parse
 from ..llm import CLAUDE, FREE, LLMError
 from ..prompts import GREETING
 from . import menus, render
+from .transfer import Transfer
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +43,8 @@ class App:
         self.agent = agent
         self.bot = bot
         self.locks: dict[int, asyncio.Lock] = {}
+        on_disk = config.db_path and str(config.db_path) != ":memory:"
+        self.transfer = Transfer(store, bot, config.db_path.parent if on_disk else Path(tempfile.gettempdir()) / "macaw")
         self.router = Router()
         self._register()
 
@@ -213,6 +218,22 @@ class App:
             text, kb = self._model_menu(m.from_user.id)
             await m.answer(text, reply_markup=kb, parse_mode=None)
 
+        @r.message(Command("export"))
+        async def export(m: Message):
+            if not self._allowed(m.from_user and m.from_user.id):
+                return
+            self.store.ensure_user(m.from_user.id, m.chat.id, self.config.default_timezone)
+            text, kb = self.transfer.export_menu(m.from_user.id)
+            await m.answer(text, reply_markup=kb, parse_mode=None)
+
+        @r.message(F.document)
+        async def document(m: Message):
+            if not self._allowed(m.from_user and m.from_user.id):
+                return
+            self.store.ensure_user(m.from_user.id, m.chat.id, self.config.default_timezone)
+            async with self.lock(m.from_user.id):
+                await self.transfer.on_document(m)
+
         @r.message(F.text)
         async def text(m: Message):
             if not self._allowed(m.from_user and m.from_user.id):
@@ -229,7 +250,7 @@ class App:
         @r.message()
         async def other(m: Message):
             if self._allowed(m.from_user and m.from_user.id):
-                await m.answer("I can only read text for now.")
+                await m.answer("I can only read text, and Anki decks (.apkg files).")
 
         @r.callback_query(F.data.startswith("p:"))
         async def proposal_cb(c: CallbackQuery):
@@ -319,6 +340,19 @@ class App:
             with contextlib.suppress(TelegramBadRequest):
                 await c.message.edit_text(text, reply_markup=kb)
             await c.answer("Removed. Their cards are kept in case you invite them again." if removed else None)
+
+        @r.callback_query(F.data.startswith("imp:"))
+        async def import_cb(c: CallbackQuery):
+            if not self._allowed(c.from_user.id):
+                return
+            async with self.lock(c.from_user.id):
+                await self.transfer.on_callback(c)
+
+        @r.callback_query(F.data.startswith("exp:"))
+        async def export_cb(c: CallbackQuery):
+            if not self._allowed(c.from_user.id):
+                return
+            await self.transfer.on_export_callback(c)
 
         @r.callback_query(F.data.startswith("m:"))
         async def menu_cb(c: CallbackQuery):
@@ -410,7 +444,7 @@ class App:
             return
         if action == "list":
             view = menus.deck_list(self.store, uid)
-        elif action in ("deck", "cards", "lim", "limset", "tmpl", "rev", "ren", "del", "delok"):
+        elif action in ("deck", "cards", "due", "lim", "limset", "tmpl", "rev", "ren", "del", "delok"):
             d = owned_deck(ids[0]) if ids else None
             if d is None:
                 view = menus.deck_list(self.store, uid)
@@ -419,6 +453,8 @@ class App:
                 view = menus.deck_view(self.store, d["id"])
             elif action == "cards":
                 view = menus.card_list(self.store, d["id"], ids[1] if len(ids) > 1 else 0)
+            elif action == "due":
+                view = menus.due_list(self.store, d["id"], ids[1] if len(ids) > 1 else 0)
             elif action == "lim":
                 view = menus.limits(self.store, d["id"])
             elif action == "limset":

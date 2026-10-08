@@ -397,13 +397,16 @@ class Agent:
         decks = self.store.decks(uid)
         if decks:
             lines.append("Decks:")
+            stats = srs.deck_stats(self.store, u, now)
             for d in decks:
                 due_n = sum(1 for c in queue + later if c["deck_id"] == d["id"])
+                ds = stats.get(d["id"], srs.empty_stats())
                 lines.append(
                     f"- \"{d['name']}\" (id {d['id']}, {d['deck_type']}, fields: {', '.join(deck_fields(d))}; "
                     f"reverse {'on' if d['reverse'] else 'off'}; limits {d['new_per_day']} new / "
                     f"{d['reviews_per_day']} reviews a day; language {d['language'] or 'n/a'}): "
-                    f"{self.store.count_notes(d['id'])} notes, {due_n} due today"
+                    f"{self.store.count_notes(d['id'])} notes, {due_n} due today; cards: {ds['new']} new, "
+                    f"{ds['learning']} learning, {ds['young']} young, {ds['mature']} mature"
                 )
         else:
             lines.append("Decks: none yet. Suggest creating one.")
