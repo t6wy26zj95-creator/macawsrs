@@ -60,9 +60,12 @@ class Models:
         return self.free
 
 
-def make_free_provider(api_key: str | None, base_url: str, model: str) -> LLMProvider | None:
+def make_free_provider(
+    api_key: str | None, base_url: str, model: str, fallbacks: tuple[str, ...] = ()
+) -> LLMProvider | None:
     if not api_key:
         return None
     from .openai_compat import OpenAICompatProvider
 
-    return OpenAICompatProvider(base_url, api_key, model)
+    models = [model] + [m for m in fallbacks if m != model]
+    return OpenAICompatProvider(base_url, api_key, models)
