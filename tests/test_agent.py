@@ -516,3 +516,49 @@ async def test_no_next_card_button_when_nothing_is_due(agent, llm, store):
     assert not next(a for a in actions if isinstance(a, RatingNote)).offer_next
     actions = await agent.ask_now(UID, NOW)
     assert actions == [Text("Nothing else is due right now.")]
+
+
+async def test_sentence_on_card_front_is_kept_apart_from_the_word(agent, llm, store):
+    # Imported Anki cards often have an example sentence under the word on the front.
+    await _make_deck_with_card(agent, llm, "abode\nThey lived in a humble abode.", "a home")
+    llm.script.append(lambda p, t: _ret("What does abode mean?"))
+    await agent.ask_next(UID, NOW)
+    prompt = llm.prompts[-1]
+    assert "Ask about: abode\n" in prompt
+    assert "never shown to the user (don't refer to it): They lived in a humble abode." in prompt
+
+
+async def test_card_the_model_asked_on_its_own_is_adopted_by_its_word(agent, llm, store):
+    await _make_deck_with_card(agent, llm, "recumbent\nShe lay recumbent on the sofa.", "lying down")
+    await _make_deck_with_card(agent, llm, "accolade\nShe won many accolades.", "an award or praise")
+    llm.script.append(lambda p, t: _ret('What does "accolade" mean?'))  # the active card is recumbent
+    await agent.ask_next(UID, NOW)
+    accolade = next(c["id"] for c in store.user_cards(UID) if "accolade" in store.note(c["note_id"])["fields"])
+    assert store.state(UID)["active_card_id"] != accolade
+
+    async def grade(prompt, t):
+        out = await t["grade_card"]({"card_id": accolade, "rating": "Again"})
+        assert out.startswith("Graded")
+        return "An accolade is an award."
+
+    llm.script.append(grade)
+    actions = await agent.on_user_message(UID, "Honestly, idk", NOW + timedelta(minutes=1))
+    assert any(isinstance(a, RatingNote) for a in actions)
+
+
+async def test_model_can_grade_a_due_card_it_asked_instead_of_the_active_one(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    await _make_deck_with_card(agent, llm, "serendipity", "happy accident")
+    llm.script.append(lambda p, t: _ret("Quick one!"))
+    await agent.ask_next(UID, NOW)
+    active = store.state(UID)["active_card_id"]
+    other = next(c["id"] for c in store.user_cards(UID) if c["id"] != active)
+
+    async def grade(prompt, t):
+        out = await t["grade_card"]({"card_id": other, "rating": "Again"})
+        assert out.startswith("Graded")
+        return "No worries."
+
+    llm.script.append(grade)
+    actions = await agent.on_user_message(UID, "no idea", NOW + timedelta(minutes=1))
+    assert any(isinstance(a, RatingNote) for a in actions)

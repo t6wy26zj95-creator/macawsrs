@@ -67,6 +67,13 @@ def card_sides(fields: list[str], values: Mapping[str, str], ord_: int) -> tuple
     return prompt, answer
 
 
+def headword(prompt: str) -> tuple[str, str]:
+    """Split a prompt side into its first line and the rest. Imported Anki cards
+    often have an example sentence under the word on the front."""
+    first, _, rest = (prompt or "").strip().partition("\n")
+    return first.strip(), rest.strip()
+
+
 def answer_key(fields: list[str], values: Mapping[str, str], ord_: int) -> str:
     """The text that must not be revealed before the card is asked."""
     if ord_ == 1:
