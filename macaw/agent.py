@@ -869,6 +869,17 @@ class Agent:
                 return "Nothing is due right now. Tell the user they're all caught up (or offer to add new cards)."
             return "Ask this card now, without revealing the answer:\n" + self._card_brief(card, True)
 
+        async def pause_reviews(args):
+            st = store.state(uid)
+            self._end_session(turn)  # also withdraws the open question; the card stays due
+            msg = "Paused: the code brings up the next card later on its own, spaced out over the day."
+            if st["active_card_id"]:
+                msg += (
+                    " The open question was withdrawn and will be asked again then; don't tell the "
+                    "user they can answer it whenever."
+                )
+            return msg + " Acknowledge in a few words; don't mention when unless they ask."
+
         async def set_next_card_time(args):
             minutes = min(720, max(0, int(args["minutes"])))
             st = store.state(uid)
@@ -1034,6 +1045,13 @@ class Agent:
                 "really asked for one now, not 'when the timer is up'.",
                 _jsonschema({"count": INT, "user_asked_now": {"type": "boolean"}}, []),
                 next_card,
+            ),
+            ToolSpec(
+                "pause_reviews",
+                "The user asked you to stop, pause or slow down the questions without naming a time. "
+                "Withdraws the open question and lets the code bring cards up later, spaced out.",
+                _jsonschema({}, []),
+                pause_reviews,
             ),
             ToolSpec(
                 "set_next_card_time",
