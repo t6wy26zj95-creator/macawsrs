@@ -539,6 +539,14 @@ class Store:
             (user_id, iso(since)),
         )
 
+    def notes_added_between(self, user_id: int, start: datetime, end: datetime) -> list[sqlite3.Row]:
+        """Notes the user added in chat in a time window (imported ones carry an Anki guid and are left out)."""
+        return self.q(
+            "SELECT n.* FROM notes n JOIN decks d ON d.id=n.deck_id "
+            "WHERE d.user_id=? AND n.guid IS NULL AND n.created_at>=? AND n.created_at<? ORDER BY n.id",
+            (user_id, iso(start), iso(end)),
+        )
+
     # ---------- proposals ----------
 
     def create_proposal(self, user_id: int, deck_id: int, fields: dict[str, str]) -> int:
