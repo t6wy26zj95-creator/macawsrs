@@ -10,6 +10,7 @@ from macaw import srs
 from macaw.agent import REGRADE_WINDOW, Agent, ConfirmDelete, Preview, RatingNote, Text
 from macaw.bot.app import App
 from macaw.config import Config
+from macaw.db import iso
 
 from .conftest import UID, FakeLLM, at
 
@@ -876,3 +877,37 @@ async def test_writing_on_an_ignored_day_brings_back_normal_timing(agent, llm, s
     # Usual reminders that day, counted from their message, rather than one dry nag.
     assert len(app.bot.sent) - n >= 2
     assert not any("You write at most once a day now" in p for p in llm.prompts[-2:])
+
+
+async def test_context_counts_what_was_done_today(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    # Notes get the real clock as created_at; move this one into the test's study day.
+    store.x("UPDATE notes SET created_at=?", (iso(NOW - timedelta(minutes=5)),))
+    store.x("INSERT INTO notes(deck_id, fields, sort_key, created_at) VALUES (?,?,?,?)",
+                        (store.deck_by_name(UID, "English")["id"], '{"word": "old", "meaning": "x"}', "old",
+                         iso(NOW - timedelta(days=1))))
+    llm.script.append(lambda p, t: _ret("What does ubiquitous mean?"))
+    await agent.ask_next(UID, NOW)
+    card_id = store.state(UID)["active_card_id"]
+
+    async def grade(prompt, t):
+        await t["grade_card"]({"card_id": card_id, "rating": "Again", "reason": "missed"})
+        return "Not quite."
+
+    llm.script.append(grade)
+    await agent.on_user_message(UID, "no idea", NOW)
+    llm.script.append(lambda p, t: _ret("One so far."))
+    await agent.on_user_message(UID, "how many cards did we do today?", NOW + timedelta(minutes=1))
+    prompt = llm.prompts[-1]
+    assert "study day started 08:00" in prompt
+    assert "1 answers graded (1 Again) on 1 different cards, 1 of them seen for the first time: ubiquitous" in prompt
+    assert "New notes: 1 added (ubiquitous)" in prompt
+
+
+async def test_today_count_resets_when_quiet_hours_end(agent, llm, store, user):
+    await _make_deck_with_card(agent, llm)
+    card = store.user_cards(UID)[0]
+    late = at("2026-10-07 23:30")  # 01:30 in Berlin, still the 7th's study day
+    srs.grade(store, user, card["id"], 3, "user", when=late)
+    assert srs.done_today(store, user, at("2026-10-08 05:00"))["reviews"] == 1  # 07:00 Berlin
+    assert srs.done_today(store, user, at("2026-10-08 06:30"))["reviews"] == 0  # 08:30 Berlin

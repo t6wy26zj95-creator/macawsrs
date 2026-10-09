@@ -211,6 +211,29 @@ def due_queue(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict
     return out
 
 
+def done_today(store: Store, user: Mapping[str, Any], now: datetime) -> dict[str, Any]:
+    """What the user did this study day so far: every graded answer (a card asked
+    twice counts twice), distinct cards, first-time cards, the grades, and the
+    notes added in chat. Computed here so the bot can give exact numbers."""
+    ds = day_start(user, now)
+    rows = [r for r in store.reviews_since(user["id"], ds) if parse(r["reviewed_at"]) <= now]
+    rows.sort(key=lambda r: r["id"])
+    grades = {name: 0 for name in RATING_NAMES.values()}
+    card_ids: list[int] = []
+    for r in rows:
+        grades[RATING_NAMES[r["rating"]]] += 1
+        if r["card_id"] not in card_ids:
+            card_ids.append(r["card_id"])
+    return {
+        "since": ds,
+        "reviews": len(rows),
+        "card_ids": card_ids,
+        "first_time": sum(1 for r in rows if r["before_state"] == NEW),
+        "grades": grades,
+        "added": store.notes_added_between(user["id"], ds, now + timedelta(seconds=1)),
+    }
+
+
 def coming_back_today(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict[str, Any]]:
     """Cards in learning steps (new or forgotten) that come back later today, earliest first."""
     day_end = day_start(user, now) + timedelta(days=1)

@@ -457,6 +457,39 @@ class Agent:
             return f"TIMER: next card at {fmt(at)} is in quiet hours, so only if the user is chatting then."
         return f"TIMER: the code brings up the next card at about {fmt(at)}."
 
+    def _today_line(self, turn: Turn) -> str:
+        """Exact counts for today, from the review log, so 'how many did we do' gets a real number."""
+        d = srs.done_today(self.store, turn.user, turn.now)
+        since = f"{d['since'].astimezone(srs.tz_of(turn.user)):%H:%M}"
+        if not d["reviews"]:
+            done = "no cards answered yet"
+        else:
+            grades = ", ".join(f"{n} {name}" for name, n in d["grades"].items() if n)
+            done = (
+                f"{d['reviews']} answers graded ({grades}) on {len(d['card_ids'])} different cards, "
+                f"{d['first_time']} of them seen for the first time"
+            )
+            names = []
+            for cid in d["card_ids"][:DUE_LIST_LIMIT * 2]:
+                card = self.store.card(cid)
+                if card is None:
+                    continue
+                note = self.store.note(card["note_id"])
+                deck = self.store.deck(note["deck_id"])
+                names.append(headword(card_sides(deck_fields(deck), note_fields(note["fields"]), card["ord"])[0])[0])
+            if names:
+                more = len(d["card_ids"]) - len(names)
+                done += ": " + ", ".join(names) + (f" and {more} more" if more > 0 else "")
+        added = [
+            headword(card_sides(deck_fields(self.store.deck(n["deck_id"])), note_fields(n["fields"]), 0)[0])[0]
+            for n in d["added"]
+        ]
+        added_s = f"{len(added)} added ({', '.join(added[:DUE_LIST_LIMIT * 2])})" if added else "none added"
+        return (
+            f"Done today (study day started {since}; exact counts from the log, use these when asked): "
+            f"{done}. New notes: {added_s}."
+        )
+
     def _ignored_lines(self, turn: Turn, st: Any) -> list[str]:
         """How long cards have gone undone, so a reply after days of silence lands right."""
         since = parse(st["ignored_since"])
@@ -597,6 +630,7 @@ class Agent:
                 + ". If the user disputes it and you agree, call change_grade."
             )
 
+        lines.append(self._today_line(turn))
         lines.append(self._timer_line(turn, st, bool(active and self.store.card(active)), queue))
         lines.extend(self._ignored_lines(turn, st))
 
