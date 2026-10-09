@@ -246,6 +246,38 @@ async def test_ticker_asks_then_reminds_then_respects_quiet_hours(agent, llm, st
     assert len(app.bot.sent) == 2
 
 
+async def test_reminders_used_on_an_earlier_card_dont_silence_the_next(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    app = _app(store, agent)
+    # Earlier today another card used up all the reminders.
+    store.update_state(UID, reminders_date=srs.day_start(store.get_user(UID), NOW).date().isoformat(),
+                       reminders_today=4, reminders_streak=4, last_reminder_at=iso(NOW - timedelta(hours=1)))
+    llm.script.append(lambda p, t: _ret("Here's one: what's 'ubiquitous'?"))
+    await app.tick(NOW + timedelta(minutes=5))
+    asked = NOW + timedelta(minutes=5)
+    llm.script.append(lambda p, t: _ret("Still there?"))
+    await app.tick(asked + timedelta(minutes=61))
+    assert app.bot.sent[-1] == "Still there?"
+
+
+async def test_an_empty_reminder_is_not_counted_as_sent(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    app = _app(store, agent)
+    llm.script.append(lambda p, t: _ret("What's 'ubiquitous'?"))
+    await app.tick(NOW + timedelta(minutes=5))
+    asked = NOW + timedelta(minutes=5)
+    llm.script.append(lambda p, t: _ret(""))
+    await app.tick(asked + timedelta(minutes=61))
+    assert len(app.bot.sent) == 1
+    assert store.state(UID)["reminders_today"] == 0
+    assert store.state(UID)["llm_backoff_until"]  # a short pause, then it tries again
+    store.update_state(UID, llm_backoff_until=None)
+    llm.script.append(lambda p, t: _ret("Psst, still there?"))
+    await app.tick(asked + timedelta(minutes=90))
+    assert app.bot.sent[-1] == "Psst, still there?"
+    assert store.state(UID)["reminders_today"] == 1
+
+
 @pytest.mark.filterwarnings("ignore")
 def test_daily_backup_once(store, tmp_path):
     assert store.backup(tmp_path) is not None

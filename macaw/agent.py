@@ -18,7 +18,7 @@ from . import pacing, srs
 from .db import Store, iso, parse
 from .leak import contains_answer
 from .lookalike import find_lookalikes
-from .llm import LLMProvider, Models, ToolSpec
+from .llm import LLMError, LLMProvider, Models, ToolSpec
 from .prompts import SYSTEM_PROMPT
 from .templates import (
     DECK_TYPES,
@@ -216,6 +216,9 @@ class Agent:
             f"{st['reminders_streak'] + 1} today, tone: {level}. One or two sentences."
         )
         actions = await self._run(turn, event)
+        if not any(isinstance(a, Text) for a in actions):
+            # Nothing would reach the user, so don't count it as sent; the timer tries again later.
+            raise LLMError("the model wrote no reminder")
         self.store.update_state(
             user_id,
             reminders_streak=st["reminders_streak"] + 1,
@@ -319,7 +322,9 @@ class Agent:
             return
         for c in srs.due_queue(self.store, turn.user, turn.now):
             if c["id"] != active and self._prompt_in(c["id"], last_bot):
-                self.store.update_state(uid, active_card_id=c["id"], asked_at=iso(turn.now))
+                self.store.update_state(
+                    uid, active_card_id=c["id"], asked_at=iso(turn.now), reminders_streak=0, reminders_today=0
+                )
                 log.info("adopted card %s that the model asked on its own", c["id"])
                 return
 
@@ -406,8 +411,9 @@ class Agent:
         if not queue:
             return None
         card = queue[0]
+        # Each card gets its own reminders: ones spent on earlier cards today don't count.
         self.store.update_state(
-            uid, active_card_id=card["id"], asked_at=iso(turn.now), reminders_streak=0
+            uid, active_card_id=card["id"], asked_at=iso(turn.now), reminders_streak=0, reminders_today=0
         )
         if not self.store.state(uid)["ignored_since"]:
             self.store.update_state(uid, ignored_since=iso(turn.now))
