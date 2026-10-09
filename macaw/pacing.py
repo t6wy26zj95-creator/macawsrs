@@ -6,7 +6,8 @@ Pure functions over plain values so they are easy to test.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta
+import random
+from datetime import date, datetime, timedelta
 
 MIN_GAP = timedelta(minutes=5)
 MAX_GAP = timedelta(hours=2)
@@ -106,3 +107,86 @@ def should_remind(
 
 def annoyance_level(streak: int) -> str:
     return ["friendly", "nudging", "playfully annoyed", "dramatically offended"][min(streak, 3)]
+
+
+# ---------- a card left unanswered for days ----------
+# The day the card is asked keeps the normal reminders. From the next study day on the
+# bot writes at most once a day, at a different time each day, and skips some days.
+
+
+def nag_skip_chance(days_ignored: int) -> float:
+    """Skipping one day is fine, so the first days never skip; later ones skip more,
+    like someone who knows they're being ignored but can't quite let go."""
+    if days_ignored <= 2:
+        return 0.0
+    if days_ignored <= 6:
+        return 0.25
+    if days_ignored <= 20:
+        return 0.35
+    return 0.5
+
+
+def _roll(user_id: int, day: date, what: str) -> float:
+    # Seeded by user and day, so every tick of the same day makes the same choice.
+    return random.Random(f"{user_id}:{day.isoformat()}:{what}").random()
+
+
+def nag_skips_day(user_id: int, day: date, days_ignored: int) -> bool:
+    def raw(d: date, n: int) -> bool:
+        return _roll(user_id, d, "skip") < nag_skip_chance(n)
+
+    if not raw(day, days_ignored):
+        return False
+    # Never three silent days in a row.
+    one, two = day - timedelta(days=1), day - timedelta(days=2)
+    return not (raw(one, days_ignored - 1) and raw(two, days_ignored - 2))
+
+
+def nag_time(user_id: int, day_start: datetime, awake_end: datetime) -> datetime:
+    """A different time every day: from an hour after the day starts to three hours before quiet hours."""
+    awake = (awake_end - day_start) / timedelta(minutes=1)
+    span = max(0.0, awake - 4 * 60)
+    return day_start + timedelta(minutes=60 + _roll(user_id, day_start.date(), "time") * span)
+
+
+def should_nag(
+    now: datetime,
+    *,
+    user_id: int,
+    day_start: datetime,
+    awake_end: datetime,
+    days_ignored: int,
+    quiet: bool,
+    nagged_today: bool,
+    user_wrote_today: bool,
+    check_in: bool = False,
+) -> bool:
+    """The one daily message about a card left unanswered for a day or more.
+    A check-in after time the user asked for is never skipped."""
+    if quiet or nagged_today or now >= awake_end:
+        return False
+    if now < nag_time(user_id, day_start, awake_end):
+        return False
+    if check_in:
+        return True
+    if user_wrote_today:
+        return False
+    return not nag_skips_day(user_id, day_start.date(), days_ignored)
+
+
+def nag_tone(days_ignored: int) -> str:
+    if days_ignored <= 1:
+        return (
+            "light and easy, no disappointment at all: missing a day is completely fine. "
+            "Just a casual nudge back to the question."
+        )
+    if days_ignored <= 3:
+        return "dry and understated, a touch let down, like you noticed but are being cool about it"
+    if days_ignored <= 7:
+        return "dry disappointment, a bit more pointed; you've clearly noticed the pattern"
+    if days_ignored <= 20:
+        return (
+            "quieter and sadder; short. Clingy: you know you're being ignored, you try to get "
+            "their attention anyway, a little pathetic in an endearing way"
+        )
+    return "very quiet and wistful, one short line; you've mostly accepted it but still hope"

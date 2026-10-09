@@ -114,6 +114,11 @@ CREATE TABLE IF NOT EXISTS conv_state (
     reminders_today      INTEGER NOT NULL DEFAULT 0,
     reminders_streak     INTEGER NOT NULL DEFAULT 0,
     last_reminder_at     TEXT,
+    ignored_since        TEXT,                         -- a card was asked and none has been done since
+    nag_day              TEXT,                         -- study day of the last once-a-day message
+    nag_texts            TEXT,                         -- JSON: recent unanswered once-a-day messages
+    space_until          TEXT,                         -- the user asked for time: silent until then, then a check-in
+    contact_off          INTEGER NOT NULL DEFAULT 0,   -- the user asked the bot to stop writing
     editing_proposal_id  INTEGER,
     pending_input        TEXT,                         -- JSON, e.g. {"kind": "rename_deck", "deck_id": 3}
     llm_backoff_until    TEXT
@@ -183,6 +188,16 @@ class Store:
             self.x("ALTER TABLE review_log ADD COLUMN message_id INTEGER")
         if "missed" not in review_cols:
             self.x("ALTER TABLE review_log ADD COLUMN missed TEXT")
+        state_cols = {r["name"] for r in self.q("PRAGMA table_info(conv_state)")}
+        for col, decl in (
+            ("ignored_since", "TEXT"),
+            ("nag_day", "TEXT"),
+            ("nag_texts", "TEXT"),
+            ("space_until", "TEXT"),
+            ("contact_off", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if col not in state_cols:
+                self.x(f"ALTER TABLE conv_state ADD COLUMN {col} {decl}")
 
     # ---------- generic helpers ----------
 
