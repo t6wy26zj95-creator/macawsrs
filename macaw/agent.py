@@ -382,6 +382,7 @@ class Agent:
             at = pacing.next_reminder_at(
                 last_user_at=parse(st["last_user_at"]), asked_at=asked,
                 streak=st["reminders_streak"], first_gap_min=u["first_reminder_min"],
+                last_reminder_at=parse(st["last_reminder_at"]),
             )
             return f"TIMER: waiting for the answer; a reminder goes out around {fmt(at)} if there is none."
         if not queue:

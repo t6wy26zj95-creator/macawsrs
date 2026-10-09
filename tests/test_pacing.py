@@ -49,6 +49,19 @@ def test_reminders_double_and_stop_at_limit():
                                     **{**kw, "quiet": True})
 
 
+def test_one_reminder_after_quiet_hours_not_a_burst():
+    # Asked at 23:36, no answer overnight; quiet hours end at 08:00.
+    asked = at("2026-10-07 23:36")
+    kw = dict(active_card=True, asked_at=asked, last_user_at=None, quiet=False, max_reminders=4, first_gap_min=60)
+    morning = at("2026-10-08 08:00")
+    assert pacing.should_remind(morning, reminders_today=0, streak=0, **kw)
+    # That reminder went out; the next one waits a full 2 h from it, not from the question.
+    after = dict(reminders_today=1, streak=1, last_reminder_at=morning, **kw)
+    assert not pacing.should_remind(morning + timedelta(seconds=30), **after)
+    assert not pacing.should_remind(morning + timedelta(minutes=119), **after)
+    assert pacing.should_remind(morning + timedelta(minutes=120), **after)
+
+
 def test_reminder_gap_counts_from_users_last_message():
     asked = at("2026-10-07 12:00")
     talked = at("2026-10-07 12:50")
