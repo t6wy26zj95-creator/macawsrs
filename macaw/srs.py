@@ -155,6 +155,11 @@ def next_day_start(user: Mapping[str, Any], now: datetime) -> datetime:
     return day_start(user, now) + timedelta(days=1)
 
 
+def study_days_between(user: Mapping[str, Any], earlier: datetime, later: datetime) -> int:
+    """How many study days later `later` is: 0 on the same study day, 1 on the next."""
+    return (day_start(user, later).date() - day_start(user, earlier).date()).days
+
+
 # ---------- what is due ----------
 
 

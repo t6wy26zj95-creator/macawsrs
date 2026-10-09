@@ -6,6 +6,7 @@ Claude can only change state through the tools defined here.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -223,6 +224,52 @@ class Agent:
         )
         return actions
 
+    async def nag(self, user_id: int, now: datetime | None = None, check_in: bool = False) -> list[Action]:
+        """The one message a day once a card has gone unanswered past its first day,
+        or the check-in when the time the user asked for is up."""
+        now = now or datetime.now(timezone.utc)
+        st = self.store.state(user_id)
+        turn = self._turn(user_id, now)
+        since = parse(st["ignored_since"]) or now
+        days = srs.study_days_between(turn.user, since, now)
+        open_card = st["active_card_id"] and self.store.card(st["active_card_id"])
+        if not open_card and self._activate_next(turn) is None:
+            return []
+        earlier = json.loads(st["nag_texts"] or "[]")
+        if check_in:
+            event = (
+                "Earlier the user asked you to leave them alone for a while (see the conversation), "
+                "and you stayed completely quiet. That time is up now. Check in on them gently, like "
+                "someone who missed them: ask how they've been, then bring up the active card lightly, "
+                "without revealing the answer. Two or three short sentences, no reproach."
+            )
+        else:
+            event = (
+                f"No card has been done for {days} day{'s' if days != 1 else ''} now; the active card is "
+                "still waiting. You write at most once a day now, and this is today's message. "
+                f"Tone: {pacing.nag_tone(days)}. Comment on being ignored in a fresh way and steer back "
+                "to the question, without revealing the answer. Never mean, never insulting. "
+                "One or two short sentences."
+            )
+        if earlier:
+            event += (
+                "\n\nYour last messages like this, which got no reply. Don't reuse their wording, "
+                "jokes, angle or sentence shape; find something new:\n" + "\n".join(f"- {t}" for t in earlier)
+            )
+        actions = await self._run(turn, event)
+        text = next((a.text for a in actions if isinstance(a, Text)), "")
+        st = self.store.state(user_id)
+        self.store.update_state(
+            user_id,
+            nag_day=srs.day_start(turn.user, now).date().isoformat(),
+            nag_texts=json.dumps((earlier + [text])[-5:] if text else earlier),
+            space_until=None,
+            reminders_streak=st["reminders_streak"] + 1,
+            reminders_today=st["reminders_today"] + 1,
+            last_reminder_at=iso(now),  # answering it pauses instead of starting a session
+        )
+        return actions
+
     # ================= turn plumbing =================
 
     def _turn(self, user_id: int, now: datetime) -> Turn:
@@ -362,12 +409,26 @@ class Agent:
         self.store.update_state(
             uid, active_card_id=card["id"], asked_at=iso(turn.now), reminders_streak=0
         )
+        if not self.store.state(uid)["ignored_since"]:
+            self.store.update_state(uid, ignored_since=iso(turn.now))
         return card
 
     def _timer_line(self, turn: Turn, st: Any, active: bool, queue: list[dict[str, Any]]) -> str:
         """What the code will do next on its own, so Claude never has to guess or promise."""
         u, now = turn.user, turn.now
         fmt = lambda t: t.astimezone(srs.tz_of(u)).strftime("%H:%M")  # noqa: E731
+        if st["contact_off"]:
+            return (
+                "TIMER: the user asked you to stop writing to them. The code sends nothing on its own "
+                "until they do a card themselves."
+            )
+        space = parse(st["space_until"])
+        if space and now < space:
+            when = f" until {space.astimezone(srs.tz_of(u)):%A %d %B}" if turn.show_times else ""
+            return (
+                f"TIMER: the user asked for some time off; the code stays completely silent{when}, "
+                "then checks in once."
+            )
         if not turn.show_times:
             # No clock times unless the user asked, so the model has none to volunteer.
             if active:
@@ -395,6 +456,26 @@ class Agent:
         if srs.is_quiet(u, at):
             return f"TIMER: next card at {fmt(at)} is in quiet hours, so only if the user is chatting then."
         return f"TIMER: the code brings up the next card at about {fmt(at)}."
+
+    def _ignored_lines(self, turn: Turn, st: Any) -> list[str]:
+        """How long cards have gone undone, so a reply after days of silence lands right."""
+        since = parse(st["ignored_since"])
+        if since is None:
+            return []
+        days = srs.study_days_between(turn.user, since, turn.now)
+        if days < 1:
+            return []
+        lines = [
+            (
+                f"Ignored: no card has been done for {days} day{'s' if days != 1 else ''}; the code has been "
+                "writing to the user at most once a day. If they write now without doing the card, react to "
+                "that naturally (you noticed, in your own dry way), don't lecture."
+            )
+        ]
+        earlier = json.loads(st["nag_texts"] or "[]")
+        if earlier:
+            lines.append("Your recent unanswered messages: " + " | ".join(earlier[-3:]))
+        return lines
 
     def _end_session(self, turn: Turn) -> timedelta:
         uid = turn.user["id"]
@@ -517,6 +598,7 @@ class Agent:
             )
 
         lines.append(self._timer_line(turn, st, bool(active and self.store.card(active)), queue))
+        lines.extend(self._ignored_lines(turn, st))
 
         others = [c for c in queue if c["id"] != active]
         if others:
@@ -763,6 +845,8 @@ class Agent:
             store.log_message(uid, "note", f"card #{card_id} graded {srs.RATING_NAMES[rating]}")
             count = st["session_count"] + 1
             store.update_state(uid, active_card_id=None, asked_at=None, session_count=count, reminders_streak=0)
+            # A card done: whatever silence or space the user asked for is over.
+            store.update_state(uid, ignored_since=None, nag_texts=None, space_until=None, contact_off=0)
             target = turn.user["cards_per_session"] + st["burst"]
             # The user only came back after being reminded about this card: answering it
             # is not a sign they want a session now, so pause instead of asking the next one.
@@ -879,6 +963,35 @@ class Agent:
                     "user they can answer it whenever."
                 )
             return msg + " Acknowledge in a few words; don't mention when unless they ask."
+
+        async def give_space(args):
+            days = min(365, max(1, int(args["days"])))
+            # Silent until the start of that study day; the check-in comes during it.
+            until = srs.day_start(turn.user, turn.now + timedelta(days=days))
+            store.update_state(
+                uid, space_until=iso(until), active_card_id=None, asked_at=None, session_count=0, burst=0
+            )
+            store.log_message(uid, "note", f"the user asked for {days} days of space; the code stays silent until then")
+            return (
+                f"Done: the code sends nothing for {days} days, then checks in once. The open question, if any, "
+                "was withdrawn. Accept it in a sentence, in character (understanding, maybe a little wistful); "
+                "don't argue or bargain."
+            )
+
+        async def stop_writing(args):
+            store.update_state(
+                uid, contact_off=1, space_until=None, active_card_id=None, asked_at=None, session_count=0, burst=0
+            )
+            store.log_message(uid, "note", "the user asked the bot to stop writing to them")
+            return (
+                "Done: the code won't write to the user on its own anymore. It starts again once they do a "
+                "card themselves. Acknowledge in one short sentence; no guilt, no bargaining, and you may say "
+                "they can come back any time."
+            )
+
+        async def resume_writing(args):
+            store.update_state(uid, contact_off=0, space_until=None)
+            return "Done: the code brings up cards and reminders on its own again."
 
         async def set_next_card_time(args):
             minutes = min(720, max(0, int(args["minutes"])))
@@ -1052,6 +1165,29 @@ class Agent:
                 "Withdraws the open question and lets the code bring cards up later, spaced out.",
                 _jsonschema({}, []),
                 pause_reviews,
+            ),
+            ToolSpec(
+                "give_space",
+                "The user, without doing the card, asks you to leave them alone for days or longer, or to "
+                "come back later ('come back in a month', 'give me a week'). days = how long. The code stays "
+                "completely silent that long, then checks in once. For hours or a time today, use "
+                "set_next_card_time instead.",
+                _jsonschema({"days": INT}, ["days"]),
+                give_space,
+            ),
+            ToolSpec(
+                "stop_writing",
+                "The user clearly wants you to stop messaging them altogether ('stop writing to me', "
+                "'leave me alone, stop texting'). Not for 'stop the questions for now' (pause_reviews). "
+                "The code then never writes first until they do a card on their own.",
+                _jsonschema({}, []),
+                stop_writing,
+            ),
+            ToolSpec(
+                "resume_writing",
+                "The user says you may write to them again after they asked for space or for you to stop.",
+                _jsonschema({}, []),
+                resume_writing,
             ),
             ToolSpec(
                 "set_next_card_time",

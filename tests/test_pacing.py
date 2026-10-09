@@ -74,3 +74,47 @@ def test_leak_detection():
     assert contains_answer("Ubiquitous!", "ubiquitous")
     assert not contains_answer("I love ubiquitousness", "ubiquitous")
     assert not contains_answer("anything", "a")
+
+
+def test_first_days_of_ignoring_are_never_skipped():
+    for uid in range(50):
+        day = at("2026-10-07 06:00").date()
+        assert not pacing.nag_skips_day(uid, day, 1)
+        assert not pacing.nag_skips_day(uid, day, 2)
+
+
+def test_nag_skips_some_days_but_never_three_in_a_row():
+    start = at("2026-10-07 06:00").date()
+    skips = [pacing.nag_skips_day(7, start + timedelta(days=n), n) for n in range(1, 200)]
+    assert 20 < sum(skips) < 120
+    assert not any(skips[i] and skips[i + 1] and skips[i + 2] for i in range(len(skips) - 2))
+    # The same day always makes the same choice.
+    assert skips == [pacing.nag_skips_day(7, start + timedelta(days=n), n) for n in range(1, 200)]
+
+
+def test_nag_time_varies_and_stays_inside_the_awake_day():
+    times = set()
+    for n in range(30):
+        ds = at("2026-10-07 06:00") + timedelta(days=n)
+        t = pacing.nag_time(7, ds, ds + timedelta(hours=16))
+        assert ds + timedelta(hours=1) <= t <= ds + timedelta(hours=13)
+        times.add((t - ds).seconds // 3600)
+    assert len(times) > 5
+
+
+def test_one_nag_a_day_and_check_in_is_never_skipped():
+    ds = at("2026-10-07 06:00")
+    end = ds + timedelta(hours=16)
+    kw = dict(user_id=7, day_start=ds, awake_end=end, days_ignored=1, quiet=False, user_wrote_today=False)
+    slot = pacing.nag_time(7, ds, end)
+    assert not pacing.should_nag(slot - timedelta(minutes=1), nagged_today=False, **kw)
+    assert pacing.should_nag(slot, nagged_today=False, **kw)
+    assert not pacing.should_nag(slot, nagged_today=True, **kw)
+    assert not pacing.should_nag(slot, nagged_today=False, **{**kw, "quiet": True})
+    # A day that gets skipped still gets the check-in.
+    n = next(n for n in range(3, 400) if pacing.nag_skips_day(7, (ds + timedelta(days=n)).date(), 30))
+    ds = ds + timedelta(days=n)
+    kw.update(day_start=ds, awake_end=ds + timedelta(hours=16), days_ignored=30)
+    slot = pacing.nag_time(7, ds, ds + timedelta(hours=16))
+    assert not pacing.should_nag(slot, nagged_today=False, **kw)
+    assert pacing.should_nag(slot, nagged_today=False, check_in=True, **kw)

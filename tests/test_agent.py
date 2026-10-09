@@ -743,3 +743,136 @@ async def test_skipped_missed_field_falls_back_to_the_reason_on_hard(agent, llm,
     card_id, actions = await _graded_hard(agent, llm, store)
     log_id = next(a for a in actions if isinstance(a, RatingNote)).log_id
     assert store.review(log_id)["missed"] == "core idea, but not all"
+
+
+# ---------- a card ignored for days ----------
+
+
+def _numbered_replies(llm, n=400):
+    for i in range(n):
+        llm.script.append(lambda p, t, i=i: _ret(f"message {i}"))
+
+
+async def _run_days(app, start, days, step=timedelta(minutes=15)):
+    """Tick through `days` days; returns {study-day index: [texts sent]}."""
+    sent: dict[int, list[str]] = {}
+    t = start
+    user = dict(app.store.get_user(UID))
+    while t < start + timedelta(days=days):
+        before = len(app.bot.sent)
+        await app.tick(t)
+        for text in app.bot.sent[before:]:
+            sent.setdefault(srs.study_days_between(user, start, t), []).append(text)
+        t += step
+    return sent
+
+
+async def test_ignored_card_gets_one_message_a_day_and_never_stops(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    app = _app(store, agent)
+    _numbered_replies(llm)
+    sent = await _run_days(app, NOW + timedelta(minutes=5), 40)
+    # The day it is asked: the question plus the usual reminders.
+    assert len(sent[0]) >= 3
+    # After that: never more than one a day; the first two days always get one.
+    assert all(len(v) == 1 for k, v in sent.items() if k >= 1)
+    assert 1 in sent and 2 in sent
+    quiet_days = [d for d in range(1, 40) if d not in sent]
+    assert quiet_days  # it skips some days
+    assert not any(d + 1 in quiet_days and d + 2 in quiet_days for d in quiet_days)
+    assert max(sent) >= 38  # still writing after more than a month
+
+    nags = [p for p in llm.prompts if "You write at most once a day now" in p]
+    assert "no disappointment" in nags[0]  # missing one day is fine
+    assert "disappointment" in nags[3] and "no disappointment" not in nags[3]
+    assert "wistful" in nags[-1]
+    # It sees what it said before so it can say something new.
+    assert "message" in nags[-1].split("got no reply")[1]
+    # No message in quiet hours (Berlin 00:00-08:00 is 22:00-06:00 UTC).
+    assert store.state(UID)["active_card_id"] is not None
+
+
+async def test_reply_asking_for_a_month_is_honored_then_checks_in(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    app = _app(store, agent)
+    _numbered_replies(llm, 30)
+    start = NOW + timedelta(minutes=5)
+    await _run_days(app, start, 7)
+    llm.script.clear()
+
+    async def later(prompt, t):
+        assert "Ignored: no card has been done for" in prompt
+        out = await t["give_space"]({"days": 30})
+        assert "silent" in out or "nothing" in out
+        return "Fine. A month it is."
+
+    llm.script.append(later)
+    talk = start + timedelta(days=7, hours=1)
+    await agent.on_user_message(UID, "come back in a month", talk)
+    assert store.state(UID)["active_card_id"] is None
+    _numbered_replies(llm, 30)
+    n = len(app.bot.sent)
+    silent = await _run_days(app, talk, 29)
+    assert silent == {} and len(app.bot.sent) == n
+    after = await _run_days(app, talk + timedelta(days=29), 3)
+    assert sum(len(v) for v in after.values()) >= 1
+    check_ins = [p for p in llm.prompts if "That time is up now" in p]
+    assert len(check_ins) == 1
+    assert store.state(UID)["space_until"] is None
+    assert store.state(UID)["active_card_id"] is not None
+
+
+async def test_stop_writing_stops_everything_until_a_card_is_done(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    app = _app(store, agent)
+    _numbered_replies(llm, 30)
+    start = NOW + timedelta(minutes=5)
+    await _run_days(app, start, 3)
+    llm.script.clear()
+
+    async def stop(prompt, t):
+        await t["stop_writing"]({})
+        return "Okay. I'll be here."
+
+    llm.script.append(stop)
+    talk = start + timedelta(days=3, hours=1)
+    await agent.on_user_message(UID, "stop writing to me", talk)
+    n = len(app.bot.sent)
+    _numbered_replies(llm, 30)
+    assert await _run_days(app, talk, 20) == {}
+    assert len(app.bot.sent) == n
+
+    # They come back and do a card on their own: back to normal.
+    llm.script.clear()
+    back = talk + timedelta(days=20, hours=2)
+    llm.script.append(lambda p, t: _ret("What does ubiquitous mean?"))
+    await agent.ask_now(UID, back)
+    card_id = store.state(UID)["active_card_id"]
+
+    async def grade(prompt, t):
+        await t["grade_card"]({"card_id": card_id, "rating": "Good"})
+        return "Yes!"
+
+    llm.script.append(grade)
+    await agent.on_user_message(UID, "everywhere", back + timedelta(minutes=1))
+    st = store.state(UID)
+    assert st["contact_off"] == 0 and st["ignored_since"] is None
+
+
+async def test_writing_on_an_ignored_day_brings_back_normal_timing(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    app = _app(store, agent)
+    _numbered_replies(llm, 60)
+    start = NOW + timedelta(minutes=5)
+    await _run_days(app, start, 4)
+    llm.script.clear()
+    llm.script.append(lambda p, t: _ret("Oh, hello."))
+    # 08:30 Berlin on day 4: the user writes but doesn't answer.
+    talk = at("2026-10-11 06:30")
+    await agent.on_user_message(UID, "hey", talk)
+    _numbered_replies(llm, 20)
+    n = len(app.bot.sent)
+    await _run_days(app, talk, 0.6)
+    # Usual reminders that day, counted from their message, rather than one dry nag.
+    assert len(app.bot.sent) - n >= 2
+    assert not any("You write at most once a day now" in p for p in llm.prompts[-2:])

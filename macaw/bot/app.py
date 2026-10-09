@@ -189,12 +189,14 @@ class App:
             if not self._allowed(m.from_user and m.from_user.id):
                 return
             u = self.store.ensure_user(m.from_user.id, m.chat.id, self.config.default_timezone)
+            off = "Writing first: off until you do a card\n" if self.store.state(u["id"])["contact_off"] else ""
             await m.answer(
                 f"Timezone: {u['timezone']}\n"
                 f"Quiet hours: {u['quiet_start']}–{u['quiet_end']}\n"
                 f"Cards per session: {u['cards_per_session']}\n"
                 f"Reminders: up to {u['max_reminders']} a day, first after {u['first_reminder_min']} min\n"
-                f"Desired retention: {u['desired_retention']}\n\n"
+                f"Desired retention: {u['desired_retention']}\n"
+                f"{off}\n"
                 "To change any of these, just tell me, e.g. \"I'm in Berlin\" or \"ask me 3 cards at a time\".",
                 parse_mode=None,
             )
@@ -576,6 +578,48 @@ class App:
         if st["active_card_id"] and not active:
             self.store.update_state(uid, active_card_id=None, asked_at=None)
 
+        # The user asked the bot to stop writing: nothing until they do a card themselves.
+        if st["contact_off"]:
+            return
+        space = parse(st["space_until"])
+        if space and now < space:
+            return
+        has_due = bool(srs.due_queue(self.store, user, now))
+        ignored = parse(st["ignored_since"])
+        if active and ignored is None:
+            # A card that was already open when this tracking started.
+            ignored = parse(st["asked_at"]) or now
+            self.store.update_state(uid, ignored_since=iso(ignored))
+        elif ignored is not None and not active and not has_due:
+            # Nothing left to ignore.
+            self.store.update_state(uid, ignored_since=None, nag_texts=None)
+            ignored = None
+        if space and not active and not has_due:
+            self.store.update_state(uid, space_until=None)
+            space = None
+        days = srs.study_days_between(user, ignored, now) if ignored else 0
+        start = srs.day_start(user, now)
+        wrote_today = last_user is not None and last_user >= start
+        # Past the day it was asked: one message a day at most, some days none. Once the
+        # user writes that day they're around again, so the usual timing applies.
+        if space is not None or (days >= 1 and not wrote_today):
+            if pacing.should_nag(
+                now,
+                user_id=uid,
+                day_start=start,
+                awake_end=srs.awake_end(user, now),
+                days_ignored=days,
+                quiet=quiet,
+                nagged_today=st["nag_day"] == start.date().isoformat(),
+                user_wrote_today=wrote_today,
+                check_in=space is not None,
+            ):
+                check_in = space is not None
+                await self.run_llm(
+                    uid, user["chat_id"], lambda: self.agent.nag(uid, now, check_in=check_in), notify=False
+                )
+            return
+
         if pacing.should_remind(
             now,
             active_card=active,
@@ -591,7 +635,6 @@ class App:
             await self.run_llm(uid, user["chat_id"], lambda: self.agent.remind(uid, now), notify=False)
             return
 
-        has_due = bool(srs.due_queue(self.store, user, now))
         if pacing.should_ask(
             now,
             has_due=has_due,
