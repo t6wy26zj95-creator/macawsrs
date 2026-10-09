@@ -764,6 +764,11 @@ class Agent:
             count = st["session_count"] + 1
             store.update_state(uid, active_card_id=None, asked_at=None, session_count=count, reminders_streak=0)
             target = turn.user["cards_per_session"] + st["burst"]
+            # The user only came back after being reminded about this card: answering it
+            # is not a sign they want a session now, so pause instead of asking the next one.
+            asked, reminded_at = parse(st["asked_at"]), parse(st["last_reminder_at"])
+            if asked and reminded_at and reminded_at >= asked:
+                target = count
             if missed and before:
                 # The same card fell short again: teach it properly and have the user say it
                 # back before the next card. The timer brings the next one up after their reply.

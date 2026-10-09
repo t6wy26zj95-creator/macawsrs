@@ -129,6 +129,27 @@ async def test_more_cards_in_a_row(agent, llm, store):
     assert second and second != first
 
 
+async def test_answer_after_a_reminder_pauses_the_session(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    await _make_deck_with_card(agent, llm, "serendipity", "happy accident")
+    store.update_user(UID, cards_per_session=3)
+    llm.script.append(lambda p, t: _ret("What does ubiquitous mean?"))
+    await agent.ask_next(UID, NOW)
+    card_id = store.state(UID)["active_card_id"]
+    llm.script.append(lambda p, t: _ret("Still thinking about ubiquitous?"))
+    await agent.remind(UID, NOW + timedelta(hours=1))
+
+    async def grade(prompt, t):
+        out = await t["grade_card"]({"card_id": card_id, "rating": "Good"})
+        assert "Session done" in out
+        return "Yes!"
+
+    llm.script.append(grade)
+    actions = await agent.on_user_message(UID, "everywhere", NOW + timedelta(hours=2))
+    assert store.state(UID)["active_card_id"] is None
+    assert next(a for a in actions if isinstance(a, RatingNote)).offer_next
+
+
 async def test_delete_needs_confirmation(agent, llm, store):
     await _make_deck_with_card(agent, llm)
     note_id = store.notes_in_deck(store.deck_by_name(UID, "English")["id"])[0]["id"]
