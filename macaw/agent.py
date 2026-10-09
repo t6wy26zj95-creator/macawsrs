@@ -232,9 +232,9 @@ class Agent:
         turn = self._turn(user_id, now)
         since = parse(st["ignored_since"]) or now
         days = srs.study_days_between(turn.user, since, now)
-        if not (st["active_card_id"] and self.store.card(st["active_card_id"])):
-            if self._activate_next(turn) is None:
-                return []
+        open_card = st["active_card_id"] and self.store.card(st["active_card_id"])
+        if not open_card and self._activate_next(turn) is None:
+            return []
         earlier = json.loads(st["nag_texts"] or "[]")
         if check_in:
             event = (
@@ -466,9 +466,11 @@ class Agent:
         if days < 1:
             return []
         lines = [
-            f"Ignored: no card has been done for {days} day{'s' if days != 1 else ''}; the code has been "
-            "writing to the user at most once a day. If they write now without doing the card, react to "
-            "that naturally (you noticed, in your own dry way), don't lecture."
+            (
+                f"Ignored: no card has been done for {days} day{'s' if days != 1 else ''}; the code has been "
+                "writing to the user at most once a day. If they write now without doing the card, react to "
+                "that naturally (you noticed, in your own dry way), don't lecture."
+            )
         ]
         earlier = json.loads(st["nag_texts"] or "[]")
         if earlier:
