@@ -278,6 +278,28 @@ async def test_an_empty_reminder_is_not_counted_as_sent(agent, llm, store):
     assert store.state(UID)["reminders_today"] == 1
 
 
+async def test_session_ending_at_night_waits_for_morning(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    await _make_deck_with_card(agent, llm, "serendipity", "happy accident")
+    store.update_user(UID, cards_per_session=1)
+    app = _app(store, agent)
+    night = at("2026-10-07 22:15")  # 00:15 in Berlin, quiet hours
+    llm.script.append(lambda p, t: _ret("What does ubiquitous mean?"))
+    await agent.ask_next(UID, night)
+    card_id = store.state(UID)["active_card_id"]
+
+    async def grade(prompt, t):
+        await t["grade_card"]({"card_id": card_id, "rating": "Good"})
+        return "Right! It's getting late."
+
+    llm.script.append(grade)
+    await agent.on_user_message(UID, "everywhere", night + timedelta(minutes=4))
+    llm.script.append(lambda p, t: _ret("Next: serendipity?"))
+    await app.tick(night + timedelta(minutes=10))  # the user is still "around", but it's night
+    assert app.bot.sent == []
+    assert store.state(UID)["next_ask_at"] == iso(at("2026-10-08 06:00"))  # 08:00 in Berlin
+
+
 @pytest.mark.filterwarnings("ignore")
 def test_daily_backup_once(store, tmp_path):
     assert store.backup(tmp_path) is not None
