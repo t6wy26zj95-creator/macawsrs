@@ -67,9 +67,14 @@ def next_reminder_at(
     asked_at: datetime,
     streak: int,
     first_gap_min: int,
+    last_reminder_at: datetime | None = None,
 ) -> datetime:
     """Reminders double their gap: 1h, 2h, 4h, ... after the question (or the last reply)."""
     base = max([t for t in (asked_at, last_user_at) if t is not None])
+    # Count each gap from the reminder actually sent, so reminders held back by
+    # quiet hours don't all come due at once when the morning starts.
+    if streak > 0 and last_reminder_at is not None and last_reminder_at > base:
+        return last_reminder_at + timedelta(minutes=first_gap_min * (2**streak))
     total = sum(first_gap_min * (2**i) for i in range(streak + 1))
     return base + timedelta(minutes=total)
 
@@ -85,6 +90,7 @@ def should_remind(
     max_reminders: int,
     streak: int,
     first_gap_min: int,
+    last_reminder_at: datetime | None = None,
 ) -> bool:
     if not active_card or asked_at is None:
         return False
@@ -93,7 +99,8 @@ def should_remind(
     if quiet or reminders_today >= max_reminders:
         return False
     return now >= next_reminder_at(
-        last_user_at=last_user_at, asked_at=asked_at, streak=streak, first_gap_min=first_gap_min
+        last_user_at=last_user_at, asked_at=asked_at, streak=streak, first_gap_min=first_gap_min,
+        last_reminder_at=last_reminder_at,
     )
 
 

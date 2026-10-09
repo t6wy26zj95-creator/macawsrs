@@ -586,6 +586,7 @@ class App:
             max_reminders=user["max_reminders"],
             streak=st["reminders_streak"],
             first_gap_min=user["first_reminder_min"],
+            last_reminder_at=parse(st["last_reminder_at"]),
         ):
             await self.run_llm(uid, user["chat_id"], lambda: self.agent.remind(uid, now), notify=False)
             return
