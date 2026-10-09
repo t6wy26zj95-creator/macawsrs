@@ -522,6 +522,10 @@ class Agent:
         gap = pacing.gap_until_next_session(
             turn.now, srs.awake_end(turn.user, turn.now), remaining, turn.user["cards_per_session"]
         )
+        if srs.is_quiet(turn.user, turn.now):
+            # A session that ends at night isn't followed by another one until morning;
+            # the user can still tap Next card to keep going.
+            gap = srs.next_day_start(turn.user, turn.now) - turn.now
         self.store.update_state(
             uid,
             session_count=0,
