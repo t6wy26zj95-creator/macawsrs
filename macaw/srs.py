@@ -19,6 +19,7 @@ from .db import Store, iso, parse
 
 NEW = 0
 REVIEW = 2  # 1 and 3 are (re)learning steps
+LONG_OVERDUE = timedelta(days=30)
 RATING_NAMES = {1: "Again", 2: "Hard", 3: "Good", 4: "Easy"}
 RATING_BY_NAME = {v.lower(): k for k, v in RATING_NAMES.items()}
 
@@ -109,6 +110,14 @@ def regrade(store: Store, user: Mapping[str, Any], log_id: int, rating: int,
 # ---------- time helpers ----------
 
 
+def recall_at(scheduler: Scheduler, sched: Mapping[str, Any], when: datetime) -> float:
+    """The chance, as the scheduler sees it, that a studied card is still remembered at `when`."""
+    if sched.get("stability") is None or sched.get("last_review") is None:
+        return 1.0
+    card = _to_fsrs(0, sched)
+    return scheduler.get_card_retrievability(card, current_datetime=when.astimezone(timezone.utc))
+
+
 def tz_of(user: Mapping[str, Any]) -> tzinfo:
     try:
         return ZoneInfo(user["timezone"])
@@ -183,11 +192,16 @@ def backlog(store: Store, user: Mapping[str, Any], now: datetime) -> dict[str, A
     overdue_done = left-over cards already done today,
     pace = answers a day over the last (up to) 7 study days,
     again_rate = share of real reviews (cards out of their learning steps) answered Again
-    in that time. Misses in learning steps don't count: a word just met is often missed."""
+    in that time. Misses in learning steps don't count: a word just met is often missed.
+    expected_again = the share of those reviews the scheduler itself expected to be forgotten,
+    given how long each card had waited (a card a year overdue is expected to be forgotten often),
+    long_overdue = how many of those reviews were of cards more than LONG_OVERDUE past due."""
     ds = day_start(user, now)
     overdue = sum(1 for c in store.user_cards(user["id"]) if _left_over(c, ds, now))
     week = store.reviews_since(user["id"], ds - timedelta(days=7))
     overdue_done, before_today, studied, again = 0, [], 0, 0
+    expected, long_overdue = 0.0, 0
+    scheduler = scheduler_for(user)
     for r in week:
         at = parse(r["reviewed_at"])
         if at > now:
@@ -202,6 +216,9 @@ def backlog(store: Store, user: Mapping[str, Any], now: datetime) -> dict[str, A
         if before.get("state") == REVIEW:
             studied += 1
             again += r["rating"] == 1
+            expected += 1 - recall_at(scheduler, before, at)
+            due = parse(before.get("due"))
+            long_overdue += due is not None and at - due > LONG_OVERDUE
     pace = 0.0
     if before_today:
         days = max(1, min(7, study_days_between(user, min(before_today), now)))
@@ -212,6 +229,8 @@ def backlog(store: Store, user: Mapping[str, Any], now: datetime) -> dict[str, A
         "pace": pace,
         "again_rate": again / studied if studied else None,
         "studied_reviews": studied,
+        "expected_again": expected / studied if studied else None,
+        "long_overdue": long_overdue,
     }
 
 
@@ -414,6 +433,12 @@ def coming_back_today(store: Store, user: Mapping[str, Any], now: datetime) -> l
 def due_today(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict[str, Any]]:
     """Everything still to review today: due now, plus learning cards coming back later today."""
     return due_queue(store, user, now) + coming_back_today(store, user, now)
+
+
+def not_reviewed_here(store: Store, user: Mapping[str, Any]) -> int:
+    """Studied cards (from an Anki import) that haven't had a review in the bot yet."""
+    seen = {r["card_id"] for r in store.reviews_since(user["id"], datetime(1970, 1, 1, tzinfo=timezone.utc))}
+    return sum(1 for c in store.user_cards(user["id"]) if c["state"] != NEW and c["id"] not in seen)
 
 
 def upcoming(store: Store, user: Mapping[str, Any], now: datetime, days: int = 7) -> list[tuple[datetime, int]]:

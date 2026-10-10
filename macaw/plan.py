@@ -39,6 +39,9 @@ class Plan:
     new_reasons: list[str] = field(default_factory=list)  # why the suggestion is lower: backlog, hard, workload
     pace: float = 0.0  # answers a day lately
     again_rate: float | None = None
+    expected_again: float | None = None  # what the scheduler expected, given how long cards waited
+    studied_reviews: int = 0
+    long_overdue: int = 0
     # Today's plan as set (by the bot, or by the code when the bot didn't), if any.
     set_by: str | None = None
     reason: str | None = None
@@ -109,6 +112,9 @@ def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
         new_reasons=limits["reasons"],
         pace=b["pace"],
         again_rate=b["again_rate"],
+        expected_again=b["expected_again"],
+        studied_reviews=b["studied_reviews"],
+        long_overdue=b["long_overdue"],
         due_left_over=due["left_over"],
         due_scheduled=due["scheduled"],
         learning=due["learning"],
@@ -174,7 +180,7 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
     lines = ["PROGRESS REPORT (exact, from the review log; read it like a teacher reads a student's record):"]
     days = srs.history(store, user, now)
     # Days before any record (the bot wasn't in use yet) say nothing.
-    while days and not (days[0]["answers"] or days[0]["due"] is not None or days[0]["left_after"]):
+    while days and not (days[0]["answers"] or days[0]["due"] is not None):
         days.pop(0)
     if days:
         lines.append("Last 7 study days:")
@@ -190,24 +196,60 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
     if p.overdue_at_start:
         days_n = p.catch_up_days
         s += (
-            f" {p.overdue_at_start} were left over at the start of today ({p.overdue} still are); at about "
-            f"{p.quota} a day they're cleared in about {days_n} day{'s' if days_n != 1 else ''}."
+            f" {p.overdue_at_start} were left over at the start of today ({p.overdue} still are); doing about "
+            f"{p.quota} of them a day on top of each day's scheduled reviews clears them in about {days_n} "
+            f"day{'s' if days_n != 1 else ''}."
         )
     if p.pace:
         s += f" Lately about {round(p.pace)} answers a day."
     if p.again_rate is not None:
         normal = round((1 - float(user["desired_retention"])) * 100)
         s += (
-            f" Forgotten lately: {round(p.again_rate * 100)}% of reviews (not counting learning steps of "
-            f"new words); the scheduler aims for about {normal}%."
+            f" Forgotten lately: {round(p.again_rate * 100)}% of {p.studied_reviews} reviews (not counting "
+            f"learning steps)."
         )
+        if p.long_overdue:
+            s += (
+                f" {p.long_overdue} of those reviews were cards more than a month overdue, and from how long "
+                f"each card had waited the scheduler expected about {round(p.expected_again * 100)}% to be "
+                f"forgotten. Forgetting long-overdue cards is expected, not a failure; compare with that "
+                f"figure, not with the {normal}% the scheduler aims for on cards reviewed on time."
+            )
+        else:
+            s += (
+                f" From how long each card had waited, the scheduler expected about "
+                f"{round(p.expected_again * 100)}%; on cards reviewed on time it aims for about {normal}%."
+            )
     lines.append(s)
+
+    ahead = srs.upcoming(store, user, now)
+    if ahead and p.pace:
+        per_day = round(sum(n for _, n in ahead) / 7)
+        if per_day > p.pace * 1.1:
+            lines.append(
+                f"Reviews already scheduled for the next 7 days: about {per_day} a day, more than the "
+                f"{round(p.pace)} a day done lately. At that pace more cards are left over each day, on top "
+                f"of today's."
+            )
+    fresh = srs.not_reviewed_here(store, user)
+    if fresh:
+        lines.append(
+            f"{fresh} studied cards came in with an Anki import and haven't been reviewed here yet. Their "
+            f"due dates come from Anki (and from spreading the overdue ones over days at import), so part "
+            f"of what's due, left over and forgotten is that old deck coming back after the gap, not "
+            f"something the user did wrong here."
+        )
 
     why = ", ".join(WHY_FEWER_NEW[r] for r in p.new_reasons)
     suggestion = (
         f"{p.suggested_new} new cards (the decks allow {p.new_limit}" + (f"; fewer because {why}" if why else "")
         + f"), {p.suggested_round} card{'s' if p.suggested_round != 1 else ''} a round"
     )
+    if not p.new_limit and not p.new_left:
+        lines.append(
+            "No new cards are waiting in the decks today, so there are no new words to hold back: "
+            "don't talk about stopping or slowing new words."
+        )
     if p.has_plan:
         by = "you set it" if p.set_by == "bot" else "set by the code because you didn't"
         s = (

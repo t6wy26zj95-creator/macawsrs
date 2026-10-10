@@ -44,8 +44,9 @@ def test_backlog_status_thresholds():
     assert pacing.backlog_status(3) == "slipping"
     assert pacing.backlog_status(12) == "behind"
     assert pacing.backlog_status(30) == "far_behind"
-    # Two days of the user's usual work left over is far behind too.
+    # Once there's a pace, far behind means more than two days of the user's usual work.
     assert pacing.backlog_status(15, pace=6) == "far_behind"
+    assert pacing.backlog_status(43, pace=32) == "behind"
 
 
 def test_new_cards_slow_down_with_a_backlog():
@@ -285,4 +286,37 @@ def test_misses_in_learning_steps_dont_count_as_forgetting(store, user):
     b = srs.backlog(store, user, NOW + timedelta(minutes=5))
     assert (b["again_rate"], b["studied_reviews"]) == (0.0, 1)
     line = "\n".join(plan.report(store, user, NOW + timedelta(minutes=5), plan.build(store, user, NOW)))
-    assert "Forgotten lately: 0% of reviews (not counting learning steps of new words); the scheduler aims for about 10%." in line
+    assert "Forgotten lately: 0% of 1 reviews (not counting learning steps)." in line
+    assert "more than a month overdue" not in line
+
+
+def test_long_overdue_cards_are_expected_to_be_forgotten(store, user):
+    """A deck not reviewed for a year: forgetting much more than the usual 10% is what the scheduler expects."""
+    make_deck(store, reviews_overdue=4)
+    for c in store.user_cards(UID):
+        store.set_card_schedule(c["id"], {
+            "state": srs.REVIEW, "step": None, "stability": 30.0, "difficulty": 5.0,
+            "due": iso(NOW - timedelta(days=400)), "last_review": iso(NOW - timedelta(days=430)),
+        })
+    for i, c in enumerate(store.user_cards(UID)):
+        srs.grade(store, user, c["id"], 1 if i == 0 else 3, "claude", None, NOW)
+    b = srs.backlog(store, user, NOW + timedelta(minutes=5))
+    assert b["long_overdue"] == 4 and b["again_rate"] == 0.25
+    assert b["expected_again"] > 0.3  # 430 days on a 30-day memory: far more than the usual 10%
+    line = "\n".join(plan.report(store, user, NOW + timedelta(minutes=5), plan.build(store, user, NOW)))
+    assert "4 of those reviews were cards more than a month overdue" in line
+    assert "No new cards are waiting in the decks today" in line
+
+
+def test_report_says_when_imported_cards_outrun_the_pace(store, user):
+    make_deck(store, reviews_today=21)
+    cards = store.user_cards(UID)
+    for c in cards[:2]:  # yesterday: two answers, so the pace is 2 a day
+        srs.grade(store, user, c["id"], 3, "claude", None, NOW - timedelta(days=1))
+    for c in cards:  # 21 cards due tomorrow: 3 a day over the week, more than 2
+        sched = srs.schedule_of(c)
+        sched["due"] = iso(NOW + timedelta(days=1))
+        store.set_card_schedule(c["id"], sched)
+    line = "\n".join(plan.report(store, user, NOW, plan.build(store, user, NOW)))
+    assert "more than the 2 a day done lately" in line
+    assert "19 studied cards came in with an Anki import and haven't been reviewed here yet" in line
