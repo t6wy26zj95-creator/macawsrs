@@ -11,6 +11,8 @@ from datetime import date, datetime, timedelta
 
 MIN_GAP = timedelta(minutes=5)
 MAX_GAP = timedelta(hours=2)
+# Between rounds the timer waits at least this long, however much is left today.
+MIN_ROUND_GAP = timedelta(minutes=30)
 # The user counts as "here" for this long after their last message, so the bot
 # keeps going at night if they chose to study then.
 ACTIVE_WINDOW = timedelta(minutes=20)
@@ -195,7 +197,7 @@ def nag_tone(days_ignored: int) -> str:
 # ---------- the study plan: what to do about a backlog ----------
 # Code owns these numbers; the bot explains them. A backlog means review cards left over
 # from earlier study days. New cards slow down at the first sign of one, so it can't grow
-# quietly, and stop while it is big; rounds get bigger when today's work won't fit.
+# quietly, and stop while it is big; the day's round size is planned so today's work fits.
 
 SLIPPING_AT = 1  # any card left over from an earlier day
 BEHIND_AT = 10

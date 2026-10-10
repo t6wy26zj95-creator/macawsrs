@@ -151,6 +151,27 @@ async def test_answer_after_a_reminder_pauses_the_session(agent, llm, store):
     assert next(a for a in actions if isinstance(a, RatingNote)).offer_next
 
 
+async def test_answer_after_a_reminder_keeps_the_round_when_they_were_already_talking(agent, llm, store):
+    await _make_deck_with_card(agent, llm)
+    await _make_deck_with_card(agent, llm, "serendipity", "happy accident")
+    store.update_user(UID, cards_per_session=3)
+    llm.script.append(lambda p, t: _ret("What does ubiquitous mean?"))
+    await agent.ask_next(UID, NOW)
+    card_id = store.state(UID)["active_card_id"]
+    llm.script.append(lambda p, t: _ret("Still thinking about ubiquitous?"))
+    await agent.remind(UID, NOW + timedelta(hours=1))
+    llm.script.append(lambda p, t: _ret("Sure, smaller rounds it is. So, ubiquitous?"))
+    await agent.on_user_message(UID, "can we do smaller rounds", NOW + timedelta(hours=2))
+
+    async def grade(prompt, t):
+        out = await t["grade_card"]({"card_id": card_id, "rating": "Good"})
+        assert "Session done" not in out
+        return "Yes!"
+
+    llm.script.append(grade)
+    await agent.on_user_message(UID, "everywhere", NOW + timedelta(hours=2, minutes=1))
+
+
 async def test_pause_withdraws_the_question_and_brings_it_back_later(agent, llm, store):
     await _make_deck_with_card(agent, llm)
     llm.script.append(lambda p, t: _ret("What does ubiquitous mean?"))
