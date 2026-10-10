@@ -571,6 +571,7 @@ class App:
         today = srs.day_start(user, now).date().isoformat()
         if st["reminders_date"] != today:
             self.store.update_state(uid, reminders_date=today, reminders_today=0)
+            srs.snapshot_day(self.store, user, now)  # how the day looks as it begins, for the progress report
             st = self.store.state(uid)
         quiet = srs.is_quiet(user, now)
         last_user = parse(st["last_user_at"])

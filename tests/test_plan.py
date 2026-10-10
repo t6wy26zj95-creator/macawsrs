@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 
 from macaw import pacing, plan, srs
-from macaw.agent import Agent
+from macaw.agent import Agent, Text
 from macaw.db import iso
 
 from .conftest import UID, FakeLLM, at
@@ -110,11 +110,33 @@ def test_plan_counts_todays_share_of_the_backlog(store, user):
     assert (p.overdue, p.overdue_at_start, p.goal_left) == (43, 44, 25)
 
 
-def test_plan_line_explains_the_numbers(store, user):
-    make_deck(store, reviews_overdue=44, new=10)
-    line = plan.describe(plan.build(store, user, NOW), 1)
-    assert "far behind" in line and "44 cards left over" in line
-    assert "New cards: 0 today instead of the usual 20" in line
+def test_report_shows_the_record_and_todays_cards(store, user):
+    make_deck(store, reviews_overdue=12, reviews_today=4, new=10)
+    yesterday = NOW - timedelta(days=1)
+    srs.snapshot_day(store, user, yesterday)
+    first = srs.due_queue(store, user, yesterday)[0]
+    srs.grade(store, user, first["id"], 1, "claude", None, yesterday)
+    srs.snapshot_day(store, user, NOW)
+    p = plan.build(store, user, NOW)
+    lines = "\n".join(plan.report(store, user, NOW, p))
+    assert "Last 7 study days:" in lines
+    assert "Wed 30 Sep" not in lines  # before any record
+    assert (
+        "Tue 06 Oct: 12 reviews due (12 of them left over from before); 1 answers on 1 cards, "
+        "0 new started, 1 of 1 reviews forgotten; 12 left over at the end"
+    ) in lines
+    assert "Today's due cards: 12 left over from earlier days, 4 reviews scheduled for today" in lines
+    assert "TODAY'S PLAN: not set yet. The code suggests 0 new cards (the decks allow 10" in lines
+
+
+def test_plan_set_for_today_decides_the_new_cards(store, user):
+    make_deck(store, reviews_today=3, new=10)
+    p = plan.set_today(store, user, NOW, new_cards=2, round_size=3, reason="easy start", set_by="bot")
+    assert sum(1 for c in srs.due_queue(store, user, NOW) if c["state"] == srs.NEW) == 2
+    assert (p.new_cap, p.round_size, p.target, p.set_by) == (2, 3, 5, "bot")
+    # Limits hold whatever the bot asks for.
+    p = plan.set_today(store, user, NOW, new_cards=500, round_size=99, reason=None, set_by="bot")
+    assert (p.new_cap, p.round_size) == (10, pacing.MAX_ROUND)
 
 
 # ---------- the bot acting on it ----------
@@ -131,31 +153,57 @@ def agent(store, llm):
 
 
 @pytest.mark.asyncio
-async def test_plan_is_announced_once_then_again_when_it_changes(agent, llm, store, user):
-    make_deck(store, reviews_overdue=12)
+async def test_first_round_of_the_day_is_the_teachers_check_in(agent, llm, store, user):
+    make_deck(store, reviews_overdue=12, new=10)
     events = []
 
-    async def ask(prompt, t):
+    async def check_in(prompt, t):
         events.append(prompt.split("<event>")[1])
-        return "What does w0 mean?"
+        out = await t["set_today_plan"]({"new_cards": 0, "cards_per_round": 3, "reason": "clear the pile first"})
+        assert "Today's plan saved: 0 new cards, 3 cards a round" in out
+        return "Yesterday left 12 cards over, so today it's those 12 and no new words, 3 at a time. What does w0 mean?"
 
-    llm.script.append(ask)
-    await agent.ask_next(UID, NOW)
-    assert "tell the user today's plan" in events[-1]
-    assert "STUDY PLAN" in llm.prompts[-1]
+    llm.script.append(check_in)
+    actions = await agent.ask_next(UID, NOW)
+    assert "daily check-in" in events[-1]
+    assert "PROGRESS REPORT" in llm.prompts[-1]
+    assert [a.text for a in actions if isinstance(a, Text)][0].startswith("Yesterday left 12")
+    assert store.day_plan(UID, "2026-10-07")["set_by"] == "bot"
+    assert not any(c["state"] == srs.NEW for c in srs.due_queue(store, user, NOW))
 
+    # The rest of the day: no more check-ins.
     store.update_state(UID, active_card_id=None, asked_at=None)
-    llm.script.append(ask)
-    await agent.ask_next(UID, NOW + timedelta(hours=1))
-    assert "today's plan" not in events[-1]
+    llm.script.append(lambda p, t: _ret("What does w1 mean?"))
+    await agent.ask_next(UID, NOW + timedelta(minutes=30))
+    assert "daily check-in" not in llm.prompts[-1].split("<event>")[1]
 
-    # Down to a few left over: the improvement gets one line.
-    for c in srs.due_queue(store, user, NOW)[:5]:
-        srs.grade(store, user, c["id"], 3, "user", None, NOW + timedelta(hours=1))
-    store.update_state(UID, active_card_id=None, asked_at=None)
-    llm.script.append(ask)
-    await agent.ask_next(UID, NOW + timedelta(hours=2))
-    assert "backlog is down to 7" in events[-1]
+
+@pytest.mark.asyncio
+async def test_a_skipped_check_in_is_written_again_and_the_plan_saved_anyway(agent, llm, store):
+    make_deck(store, reviews_overdue=12, new=10)
+    llm.script.append(lambda p, t: _ret("What does w0 mean?"))
+
+    async def again(prompt, t):
+        assert "skipped the check-in" in prompt.split("<event>")[1]
+        return "You've got 12 left over from before, so no new words today. What does w0 mean?"
+
+    llm.script.append(again)
+    actions = await agent.ask_next(UID, NOW)
+    assert [a.text for a in actions if isinstance(a, Text)] == [
+        "You've got 12 left over from before, so no new words today. What does w0 mean?"
+    ]
+    assert store.day_plan(UID, "2026-10-07")["set_by"] == "code"
+
+
+@pytest.mark.asyncio
+async def test_falling_behind_the_plan_is_said_with_the_next_card(agent, llm, store, user):
+    make_deck(store, reviews_today=30)
+    plan.set_today(store, user, NOW - timedelta(hours=4), new_cards=0, round_size=2, reason=None, set_by="bot")
+    llm.script.append(lambda p, t: _ret("What does w0 mean?"))
+    await agent.ask_next(UID, NOW + timedelta(hours=4))  # 18:00 in Berlin, nothing done since 08:00
+    event = llm.prompts[-1].split("<event>")[1]
+    assert "cards behind an even pace" in event
+    assert store.state(UID)["nudge_at"]
 
 
 @pytest.mark.asyncio

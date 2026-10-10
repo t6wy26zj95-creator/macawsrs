@@ -177,8 +177,7 @@ class Agent:
             "It's time to bring up the active card. Ask about it naturally, as part of the "
             "conversation, without revealing the answer."
         )
-        event += self._plan_news(turn)
-        return await self._run(turn, event)
+        return await self._start_round(turn, event)
 
     async def ask_now(self, user_id: int, now: datetime | None = None) -> list[Action]:
         """The user tapped Next card: that is asking for a card right now, so the
@@ -203,8 +202,7 @@ class Agent:
             "The user tapped the Next card button. Ask the active card now, naturally, "
             "without revealing the answer."
         )
-        event += self._plan_news(turn)
-        return await self._run(turn, event)
+        return await self._start_round(turn, event)
 
     async def remind(self, user_id: int, now: datetime | None = None) -> list[Action]:
         now = now or datetime.now(timezone.utc)
@@ -282,7 +280,6 @@ class Agent:
         return Turn(user=user, now=now)
 
     async def _run(self, turn: Turn, event: str, must_use_tool: bool = False) -> list[Action]:
-        uid = turn.user["id"]
         prompt = self._context(turn) + "\n\n<event>\n" + event + "\n</event>"
         llm = self.models.for_user(turn.user) if self.models else self.llm
         tools = self._tools(turn)
@@ -300,6 +297,16 @@ class Agent:
                 )
             )
         reply = strip_emoji(await llm.run(SYSTEM_PROMPT, prompt, tools, must_use_tool=must_use_tool))
+        return self._finish(turn, reply)
+
+    async def _generate(self, turn: Turn, event: str, must_use_tool: bool = False) -> str:
+        """One model turn whose reply is not sent yet (the caller checks it first)."""
+        prompt = self._context(turn) + "\n\n<event>\n" + event + "\n</event>"
+        llm = self.models.for_user(turn.user) if self.models else self.llm
+        return strip_emoji(await llm.run(SYSTEM_PROMPT, prompt, self._tools(turn), must_use_tool=must_use_tool))
+
+    def _finish(self, turn: Turn, reply: str) -> list[Action]:
+        uid = turn.user["id"]
         if reply:
             self._postpone_leaks(turn, reply, exclude=set())
             self._postpone_named_lookalikes(turn, reply)
@@ -518,15 +525,65 @@ class Agent:
             lines.append("Your recent unanswered messages: " + " | ".join(earlier[-3:]))
         return lines
 
-    def _plan_news(self, turn: Turn) -> str:
-        """At the start of a round: the plan, if it changed since it was last explained today."""
+    async def _start_round(self, turn: Turn, event: str) -> list[Action]:
+        """The first card of a round. The first round of a study day opens with the
+        teacher's check-in; later ones say so when the user has fallen behind the day's plan."""
         uid = turn.user["id"]
         p = plan.build(self.store, turn.user, turn.now)
-        today = srs.day_start(turn.user, turn.now).date().isoformat()
-        day, _, said = (self.store.state(uid)["plan_said"] or "").partition(":")
-        news = plan.announcement(p, said if day == today else None, turn.user["cards_per_session"])
-        self.store.update_state(uid, plan_said=f"{today}:{p.key}")
-        return f"\n\n{news}" if news else ""
+        if not p.has_plan and not srs.is_quiet(turn.user, turn.now):
+            return await self._check_in(turn, event)
+        st = self.store.state(uid)
+        if plan.nudge_due(p, turn.now, parse(st["nudge_at"])):
+            self.store.update_state(uid, nudge_at=iso(turn.now))
+            event += (
+                f"\n\nThe user is {p.behind_by} cards behind an even pace towards today's plan (see TODAY'S "
+                f"PLAN and the PROGRESS REPORT), so this round is {p.round_size} cards. Before the card, say so "
+                "in your own words in one or two sentences, like a teacher keeping a student on track: where "
+                "they are, what it means if the day slips (the cards pile onto tomorrow) and that you're asking "
+                "a few more in a row now. Encouraging, not scolding. Then ask the card."
+            )
+        elif p.overdue_at_start and not p.overdue and st["plan_said"] != f"{srs.day_start(turn.user, turn.now).date()}:cleared":
+            self.store.update_state(uid, plan_said=f"{srs.day_start(turn.user, turn.now).date()}:cleared")
+            event += (
+                "\n\nAll the cards left over from earlier days are done now. Before the card, say so in one "
+                "short sentence, plainly pleased."
+            )
+        return await self._run(turn, event)
+
+    async def _check_in(self, turn: Turn, card_event: str) -> list[Action]:
+        """The morning check-in: the bot sets today's plan, then tells the user about it
+        in its own words before the first card. If it skips either, the code steps in:
+        the suggested plan is saved, and a check-in that doesn't talk about the day is
+        written again once."""
+        srs.snapshot_day(self.store, turn.user, turn.now)
+        event = (
+            "This is the first round of the study day: your daily check-in as the user's teacher. "
+            "Step 1: read the PROGRESS REPORT and decide today's plan, then call set_today_plan. The code's "
+            "suggestion is a sound default; change it when the report or what the user told you gives a "
+            "reason (more new cards when they're keeping up easily, fewer when cards pile up or get "
+            "forgotten, smaller rounds if they said they're busy today). "
+            "Step 2: write the check-in, in your own words, like a good teacher who has looked at the "
+            "record: how the last days went (what was done against what was due, anything left over or "
+            "often forgotten), what today looks like and your plan for it with its numbers, and why. "
+            "Three to five short sentences, plain, no lists, no clock times, honest but encouraging. "
+            "Then, in the same message, " + card_event[0].lower() + card_event[1:]
+        )
+        reply = await self._generate(turn, event, must_use_tool=True)
+        p = plan.build(self.store, turn.user, turn.now)
+        if p.set_by != "bot":
+            log.info("the model set no plan; using the suggested one")
+            p = plan.set_today(self.store, turn.user, turn.now, p.suggested_new, p.suggested_round,
+                               None, "code")
+        if not plan.mentions_plan(reply, p):
+            log.info("the check-in didn't talk about the day; asking again")
+            reply = await self._generate(
+                turn,
+                "Your last draft skipped the check-in. This is the first round of the study day: before the "
+                "card, tell the user how the last days went and today's plan (TODAY'S PLAN, with its numbers) "
+                "and why, in three to five short sentences of your own, like their teacher. Then, in the same "
+                "message, " + card_event[0].lower() + card_event[1:],
+            ) or reply
+        return self._finish(turn, reply)
 
     def _round_target(self, turn: Turn, burst: int) -> int:
         """Cards in this round: the plan's round size, or more if the user asked for more."""
@@ -661,7 +718,7 @@ class Agent:
             )
 
         lines.append(self._today_line(turn))
-        lines.append(plan.describe(plan.build(self.store, u, now), u["cards_per_session"]))
+        lines.extend(plan.report(self.store, u, now, plan.build(self.store, u, now)))
         lines.append(self._timer_line(turn, st, bool(active and self.store.card(active)), queue))
         lines.extend(self._ignored_lines(turn, st))
 
@@ -1024,7 +1081,7 @@ class Agent:
             today = srs.day_start(turn.user, turn.now).date().isoformat()
             if (
                 not args.get("insist")
-                and p.status in ("behind", "far_behind")
+                and (p.status in ("behind", "far_behind") or p.behind_by >= 10)
                 and not srs.is_quiet(turn.user, turn.now)
                 and st["pushback_day"] != today
             ):
@@ -1032,9 +1089,9 @@ class Agent:
                 store.update_state(uid, pushback_day=today)
                 offer = min(3, max(1, p.goal_left))
                 return (
-                    "NOT paused yet. The user is behind (see STUDY PLAN), and as the one who owns their "
+                    "NOT paused yet. The user is behind (see the PROGRESS REPORT), and as the one who owns their "
                     "learning plan you don't just drop it. In two or three short sentences: say honestly "
-                    "what stopping now costs, using the STUDY PLAN numbers (the backlog grows, overdue "
+                    "what stopping now costs, using the PROGRESS REPORT numbers (the backlog grows, overdue "
                     f"cards get forgotten, catching up takes longer), and offer a smaller step: just {offer} "
                     "more cards now, then a proper break. Warm and direct, not guilt-tripping, no lecture. "
                     + ("The open question stays open; don't ask it again in this message. " if st["active_card_id"] else "")
@@ -1055,6 +1112,19 @@ class Agent:
                     "already argued against stopping, you may say in one sentence what's still left today."
                 )
             return msg + " Acknowledge in a few words; don't mention when unless they ask."
+
+        async def set_today_plan(args):
+            reason = strip_emoji(args.get("reason") or "") or None
+            p = plan.set_today(
+                store, turn.user, turn.now, args["new_cards"], args["cards_per_round"], reason, "bot"
+            )
+            store.log_message(
+                uid, "note", f"today's plan set: {p.new_cap} new cards, {p.round_size} a round, target {p.target}"
+            )
+            return (
+                f"Today's plan saved: {p.new_cap} new cards, {p.round_size} cards a round, {p.target} cards "
+                "to do today. The code brings up the cards by it. Tell the user about it in your own words."
+            )
 
         async def give_space(args):
             days = min(365, max(1, int(args["days"])))
@@ -1259,6 +1329,16 @@ class Agent:
                 "insist=true when they still want to stop after that.",
                 _jsonschema({"insist": {"type": "boolean"}}, []),
                 pause_reviews,
+            ),
+            ToolSpec(
+                "set_today_plan",
+                "Set today's study plan as the user's teacher: how many new cards today (all decks together) "
+                "and how many cards to ask in a row each round. Use the PROGRESS REPORT and the code's "
+                "suggestion; call it at the daily check-in, or later when the plan should change (the user "
+                "is busy, has an exam, keeps up easily, or is falling behind). reason: one sentence, for "
+                "your own notes.",
+                _jsonschema({"new_cards": INT, "cards_per_round": INT, "reason": STR}, ["new_cards", "cards_per_round"]),
+                set_today_plan,
             ),
             ToolSpec(
                 "give_space",

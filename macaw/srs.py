@@ -229,6 +229,7 @@ def due_queue(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict
     status = status_of(b)
     hard = pacing.material_is_hard(b["again_rate"], b["studied_reviews"])
     today = store.reviews_since(user["id"], ds)
+    reviews_done = sum(1 for r in today if r["before_state"] == REVIEW)
     new_done: dict[int, int] = {}
     rev_done: dict[int, int] = {}
     for r in today:
@@ -262,11 +263,115 @@ def due_queue(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict
         if rev_done.get(d, 0) < c["reviews_per_day"]:
             rev_done[d] = rev_done.get(d, 0) + 1
             out.append(c)
+    plan = store.day_plan(user["id"], ds.date().isoformat())
+    if plan is not None:
+        # The bot set today's plan: its number of new cards, within each deck's own limit.
+        room = plan["new_cards"] - sum(new_done.values())
+
+        def cap(c: Mapping[str, Any]) -> int:
+            return c["new_per_day"]
+    else:
+        # No plan yet: new cards only while today's reviews leave room for them (all decks
+        # together), and fewer while there's a backlog.
+        room = pacing.new_card_room(reviews_done + len(review), b["pace"]) - sum(new_done.values())
+
+        def cap(c: Mapping[str, Any]) -> int:
+            return pacing.new_card_cap(c["new_per_day"], status, hard)
     for c in new:
         d = c["deck_id"]
-        if new_done.get(d, 0) < pacing.new_card_cap(c["new_per_day"], status, hard):
+        if room > 0 and new_done.get(d, 0) < cap(c):
             new_done[d] = new_done.get(d, 0) + 1
+            room -= 1
             out.append(c)
+    return out
+
+
+def new_card_limits(store: Store, user: Mapping[str, Any], now: datetime) -> dict[str, Any]:
+    """Today's new cards, all decks together: the decks' own limits, what the plan allows,
+    and why it allows fewer (backlog, material, workload)."""
+    ds = day_start(user, now)
+    b = backlog(store, user, now)
+    status = status_of(b)
+    hard = pacing.material_is_hard(b["again_rate"], b["studied_reviews"])
+    limit = capped = 0
+    for d in store.decks(user["id"]):
+        limit += d["new_per_day"]
+        capped += pacing.new_card_cap(d["new_per_day"], status, hard)
+    today = store.reviews_since(user["id"], ds)
+    load = sum(1 for r in today if r["before_state"] == REVIEW) + sum(
+        1 for c in store.user_cards(user["id"])
+        if c["state"] == REVIEW and parse(c["due"]) and parse(c["due"]) < ds + timedelta(days=1)
+        and not (parse(c["buried_until"]) and parse(c["buried_until"]) > now)
+    )
+    room = pacing.new_card_room(load, b["pace"])
+    # A limit the deck can't reach anyway (few new cards left) isn't held back by the plan.
+    new_done = sum(1 for r in today if r["before_state"] == NEW)
+    waiting = sum(1 for c in store.user_cards(user["id"]) if c["state"] == NEW)
+    limit = min(limit, new_done + waiting)
+    capped = min(capped, limit)
+    reasons = []
+    if status != "on_track" and pacing.new_card_cap(limit, status) < limit:
+        reasons.append("backlog")
+    if hard and capped < limit:
+        reasons.append("hard")
+    if room < capped:
+        reasons.append("workload")
+    return {"limit": limit, "allowed": min(capped, room), "reasons": reasons, "review_load": load,
+            "capacity": round(pacing.daily_capacity(b["pace"]))}
+
+
+def study_day_starts(user: Mapping[str, Any], now: datetime, days: int) -> list[datetime]:
+    """Starts of the last `days` study days before today, oldest first."""
+    ds = day_start(user, now)
+    # Step back from midday, so a daylight saving change can't skip or repeat a day.
+    return [day_start(user, ds - timedelta(days=k) + timedelta(hours=12)) for k in range(days, 0, -1)]
+
+
+def snapshot_day(store: Store, user: Mapping[str, Any], now: datetime) -> None:
+    """Record what today looked like when it began (once a day), for the progress report.
+    Taken later in the day, cards already done today are counted back in."""
+    ds = day_start(user, now)
+    day_end = ds + timedelta(days=1)
+    b = backlog(store, user, now)
+    remaining = 0
+    for c in store.user_cards(user["id"]):
+        buried = parse(c["buried_until"])
+        due = parse(c["due"])
+        if c["state"] != NEW and due is not None and due < day_end and not (buried and buried > now):
+            remaining += 1
+    done = {r["card_id"] for r in store.reviews_since(user["id"], ds)
+            if r["before_state"] not in (None, NEW) and parse(r["reviewed_at"]) <= now}
+    store.record_day_stats(user["id"], ds.date().isoformat(), remaining + len(done),
+                           b["overdue"] + b["overdue_done"])
+
+
+def history(store: Store, user: Mapping[str, Any], now: datetime, days: int = 7) -> list[dict[str, Any]]:
+    """The last `days` study days before today, oldest first: answers given, different
+    cards, new cards started, studied cards forgotten (Again), and, for days the bot
+    recorded, how many were due at the start and how many of them were left over.
+    left_after is what was still left at the end (the next day's left-over count)."""
+    starts = study_day_starts(user, now, days)
+    today = day_start(user, now)
+    rows = [r for r in store.reviews_since(user["id"], starts[0]) if parse(r["reviewed_at"]) < today]
+    stats = store.day_stats(user["id"], starts[0].date().isoformat())
+    out = []
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else today
+        day = [r for r in rows if start <= parse(r["reviewed_at"]) < end]
+        studied = [r for r in day if r["before_state"] != NEW]
+        st = stats.get(start.date().isoformat())
+        after = stats.get(end.date().isoformat())
+        out.append({
+            "day": start,
+            "answers": len(day),
+            "cards": len({r["card_id"] for r in day}),
+            "new": sum(1 for r in day if r["before_state"] == NEW),
+            "forgotten": sum(1 for r in studied if r["rating"] == 1),
+            "studied": len(studied),
+            "due": st["due"] if st else None,
+            "left_over": st["left_over"] if st else None,
+            "left_after": after["left_over"] if after else None,
+        })
     return out
 
 
