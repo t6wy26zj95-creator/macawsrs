@@ -351,10 +351,16 @@ def test_rounds_grow_at_most_twice_the_plan_unless_the_user_chose_them(store, us
     assert plan.build(store, user, late).round_size == 3
 
 
-def test_report_says_which_left_over_cards_wait_for_later_days(store, user):
+def test_any_due_card_done_counts_toward_todays_target(store, user):
     make_deck(store, reviews_overdue=60, reviews_today=5)
-    line = "\n".join(plan.report(store, user, NOW, plan.build(store, user, NOW)))
-    assert "Still to do today: 25 (all of today's scheduled cards plus today's share of the left-over ones; the other 40 left-over cards are for the next days)" in line
+    p = plan.build(store, user, NOW)
+    assert p.goal_left == 25
+    line = "\n".join(plan.report(store, user, NOW, p))
+    assert "Still to do today: 25 (today's target is all of today's scheduled cards plus about 20" in line
+    # Doing more left-over cards than today's share still brings today's count down.
+    for c in [c for c in srs.due_queue(store, user, NOW) if srs._left_over(c, srs.day_start(user, NOW), NOW)][:24]:
+        srs.grade(store, user, c["id"], 3, "claude", None, NOW)
+    assert plan.build(store, user, NOW + timedelta(minutes=1)).goal_left == 1
 
 
 @pytest.mark.asyncio

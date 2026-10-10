@@ -86,7 +86,10 @@ def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
     overdue_left = max(0, min(b["overdue"], quota - b["overdue_done"]))
 
     due = _due_breakdown(store, user, now)
-    goal_left = due["scheduled"] + due["learning"] + overdue_left + due["new"]
+    # Any due card done counts toward today's target: left-over cards done beyond today's
+    # share stand in for scheduled ones (those carry over to tomorrow instead).
+    extra = max(0, b["overdue_done"] - quota)
+    goal_left = max(0, due["scheduled"] + due["learning"] + overdue_left + due["new"] - extra)
     limits = srs.new_card_limits(store, user, now)
     cps = max(1, user["cards_per_session"])
     awake_end = srs.awake_end(user, now)
@@ -223,9 +226,8 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
         f"scheduled for today, {p.learning} in learning steps (now or later today), {p.new_left} new still "
         f"to come today. Still to do today: {p.goal_left}"
         + (
-            f" (all of today's scheduled cards plus today's share of the left-over ones; the other "
-            f"{p.overdue - p.overdue_today} left-over cards are for the next days)."
-            if p.overdue > p.overdue_today else "."
+            f" (today's target is all of today's scheduled cards plus about {p.quota} of the left-over "
+            "ones; any due card done counts toward it)." if p.overdue_at_start else "."
         )
     )
     if srs.is_quiet(user, now) and (p.overdue or p.due_scheduled):
@@ -239,7 +241,7 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
     if p.overdue_at_start and not p.overdue:
         s += f" The {p.overdue_at_start} left over at the start of today are all done."
     elif p.overdue_at_start:
-        days_n = p.catch_up_days
+        days_n = -(-p.overdue // max(1, p.quota))
         s += (
             f" {p.overdue_at_start} were left over at the start of today ({p.overdue} still are); doing about "
             f"{p.quota} of them a day on top of each day's scheduled reviews clears them in about {days_n} "
