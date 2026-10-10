@@ -212,13 +212,13 @@ HARD_MIN_REVIEWS = 20
 
 
 def backlog_status(overdue: int, pace: float = 0.0) -> str:
-    """on_track, slipping (a few left over), behind, or far_behind. A backlog bigger
-    than two days of the user's usual work also counts as far behind."""
+    """on_track, slipping (a few left over), behind, or far_behind: more than two days of
+    the user's usual work left over (or FAR_BEHIND_AT, before there's a pace to go by)."""
     if overdue < SLIPPING_AT:
         return "on_track"
     if overdue < BEHIND_AT:
         return "slipping"
-    if overdue >= FAR_BEHIND_AT or (pace > 0 and overdue > 2 * pace):
+    if overdue > 2 * pace if pace > 0 else overdue >= FAR_BEHIND_AT:
         return "far_behind"
     return "behind"
 

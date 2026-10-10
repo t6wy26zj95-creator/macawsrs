@@ -435,6 +435,12 @@ def due_today(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict
     return due_queue(store, user, now) + coming_back_today(store, user, now)
 
 
+def not_reviewed_here(store: Store, user: Mapping[str, Any]) -> int:
+    """Studied cards (from an Anki import) that haven't had a review in the bot yet."""
+    seen = {r["card_id"] for r in store.reviews_since(user["id"], datetime(1970, 1, 1, tzinfo=timezone.utc))}
+    return sum(1 for c in store.user_cards(user["id"]) if c["state"] != NEW and c["id"] not in seen)
+
+
 def upcoming(store: Store, user: Mapping[str, Any], now: datetime, days: int = 7) -> list[tuple[datetime, int]]:
     """Cards already scheduled for each of the next study days (after today), as
     (day start, count) for days with at least one card. New cards are not included."""

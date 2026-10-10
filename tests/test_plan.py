@@ -44,8 +44,9 @@ def test_backlog_status_thresholds():
     assert pacing.backlog_status(3) == "slipping"
     assert pacing.backlog_status(12) == "behind"
     assert pacing.backlog_status(30) == "far_behind"
-    # Two days of the user's usual work left over is far behind too.
+    # Once there's a pace, far behind means more than two days of the user's usual work.
     assert pacing.backlog_status(15, pace=6) == "far_behind"
+    assert pacing.backlog_status(43, pace=32) == "behind"
 
 
 def test_new_cards_slow_down_with_a_backlog():
@@ -305,3 +306,17 @@ def test_long_overdue_cards_are_expected_to_be_forgotten(store, user):
     line = "\n".join(plan.report(store, user, NOW + timedelta(minutes=5), plan.build(store, user, NOW)))
     assert "4 of those reviews were cards more than a month overdue" in line
     assert "No new cards are waiting in the decks today" in line
+
+
+def test_report_says_when_imported_cards_outrun_the_pace(store, user):
+    make_deck(store, reviews_today=21)
+    cards = store.user_cards(UID)
+    for c in cards[:2]:  # yesterday: two answers, so the pace is 2 a day
+        srs.grade(store, user, c["id"], 3, "claude", None, NOW - timedelta(days=1))
+    for c in cards:  # 21 cards due tomorrow: 3 a day over the week, more than 2
+        sched = srs.schedule_of(c)
+        sched["due"] = iso(NOW + timedelta(days=1))
+        store.set_card_schedule(c["id"], sched)
+    line = "\n".join(plan.report(store, user, NOW, plan.build(store, user, NOW)))
+    assert "more than the 2 a day done lately" in line
+    assert "19 studied cards came in with an Anki import and haven't been reviewed here yet" in line
