@@ -117,6 +117,12 @@ def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
         # Never smaller than planned; bigger when what's left won't fit in the rounds left
         # today, but at most twice the plan, so a slow day doesn't turn into a barrage.
         size = min(pacing.round_size(now, awake_end, goal_left, minimum), max(minimum * 2, cps))
+        # Once the user has been told a bigger round today, it doesn't shrink back as cards get
+        # done: a round size that goes 6, 5, 6 reads like the teacher contradicting itself.
+        said = store.state(user["id"])["round_said"] or ""
+        day, _, told = said.partition(":")
+        if day == ds.date().isoformat() and told.isdigit():
+            size = max(size, int(told))
 
     p = Plan(
         status=status,
