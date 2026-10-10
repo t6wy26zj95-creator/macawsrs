@@ -10,8 +10,11 @@ from datetime import datetime, time, timedelta, timezone, tzinfo
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
+import json
+
 from fsrs import Card, Rating, Scheduler, State
 
+from . import pacing
 from .db import Store, iso, parse
 
 NEW = 0
@@ -163,12 +166,68 @@ def study_days_between(user: Mapping[str, Any], earlier: datetime, later: dateti
 # ---------- what is due ----------
 
 
+def _left_over(card: Mapping[str, Any], ds: datetime, now: datetime) -> bool:
+    """A studied card that was due on an earlier study day and still hasn't been done."""
+    if card["state"] == NEW:
+        return False
+    buried = parse(card["buried_until"])
+    if buried and buried > now:
+        return False
+    due = parse(card["due"])
+    return due is not None and due < ds
+
+
+def backlog(store: Store, user: Mapping[str, Any], now: datetime) -> dict[str, Any]:
+    """How far behind the user is, from the cards and the review log:
+    overdue = studied cards left over from earlier study days,
+    overdue_done = left-over cards already done today,
+    pace = answers a day over the last (up to) 7 study days,
+    again_rate = share of reviews of studied cards answered Again in that time."""
+    ds = day_start(user, now)
+    overdue = sum(1 for c in store.user_cards(user["id"]) if _left_over(c, ds, now))
+    week = store.reviews_since(user["id"], ds - timedelta(days=7))
+    overdue_done, before_today, studied, again = 0, [], 0, 0
+    for r in week:
+        at = parse(r["reviewed_at"])
+        if at > now:
+            continue
+        before = json.loads(r["before"])
+        if at >= ds:
+            due = parse(before.get("due"))
+            if before.get("state") != NEW and due is not None and due < ds:
+                overdue_done += 1
+        else:
+            before_today.append(at)
+        if before.get("state") != NEW:
+            studied += 1
+            again += r["rating"] == 1
+    pace = 0.0
+    if before_today:
+        days = max(1, min(7, study_days_between(user, min(before_today), now)))
+        pace = len(before_today) / days
+    return {
+        "overdue": overdue,
+        "overdue_done": overdue_done,
+        "pace": pace,
+        "again_rate": again / studied if studied else None,
+        "studied_reviews": studied,
+    }
+
+
+def status_of(b: Mapping[str, Any]) -> str:
+    return pacing.backlog_status(b["overdue"], b["pace"])
+
+
 def due_queue(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict[str, Any]]:
     """Cards to review now, in order: learning cards that are due, then review
     cards due today, then new cards within each deck's daily limit.
-    Daily review limits are per deck, as in Anki."""
+    Daily review limits are per deck, as in Anki. While there is a backlog, fewer
+    new cards come in (see pacing.new_card_cap), so it doesn't keep growing."""
     ds = day_start(user, now)
     day_end = ds + timedelta(days=1)
+    b = backlog(store, user, now)
+    status = status_of(b)
+    hard = pacing.material_is_hard(b["again_rate"], b["studied_reviews"])
     today = store.reviews_since(user["id"], ds)
     new_done: dict[int, int] = {}
     rev_done: dict[int, int] = {}
@@ -205,7 +264,7 @@ def due_queue(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict
             out.append(c)
     for c in new:
         d = c["deck_id"]
-        if new_done.get(d, 0) < c["new_per_day"]:
+        if new_done.get(d, 0) < pacing.new_card_cap(c["new_per_day"], status, hard):
             new_done[d] = new_done.get(d, 0) + 1
             out.append(c)
     return out

@@ -190,3 +190,76 @@ def nag_tone(days_ignored: int) -> str:
             "their attention anyway, a little pathetic in an endearing way"
         )
     return "very quiet and wistful, one short line; you've mostly accepted it but still hope"
+
+
+# ---------- the study plan: what to do about a backlog ----------
+# Code owns these numbers; the bot explains them. A backlog means review cards left over
+# from earlier study days. New cards slow down at the first sign of one, so it can't grow
+# quietly, and stop while it is big; rounds get bigger when today's work won't fit.
+
+SLIPPING_AT = 1  # any card left over from an earlier day
+BEHIND_AT = 10
+FAR_BEHIND_AT = 30
+# A backlog is cleared over a few days rather than all at once: about this many extra a day.
+CATCH_UP_PER_DAY = 25
+MAX_CATCH_UP_DAYS = 7
+# Rounds are planned this far apart, so a bigger day means bigger rounds, not more interruptions.
+ROUND_SPACING = timedelta(minutes=40)
+MAX_ROUND = 10
+# Lots of forgotten cards lately: the material is hard, so fewer new ones.
+HARD_AGAIN_RATE = 0.3
+HARD_MIN_REVIEWS = 20
+
+
+def backlog_status(overdue: int, pace: float = 0.0) -> str:
+    """on_track, slipping (a few left over), behind, or far_behind. A backlog bigger
+    than two days of the user's usual work also counts as far behind."""
+    if overdue < SLIPPING_AT:
+        return "on_track"
+    if overdue < BEHIND_AT:
+        return "slipping"
+    if overdue >= FAR_BEHIND_AT or (pace > 0 and overdue > 2 * pace):
+        return "far_behind"
+    return "behind"
+
+
+def material_is_hard(again_rate: float | None, reviews: int) -> bool:
+    return again_rate is not None and reviews >= HARD_MIN_REVIEWS and again_rate >= HARD_AGAIN_RATE
+
+
+def new_card_cap(deck_limit: int, status: str, hard: bool = False) -> int:
+    """How many new cards a deck may introduce today. Every new card brings several
+    reviews over the next days, so new cards are what a backlog grows from."""
+    if status == "far_behind":
+        cap = 0
+    elif status == "behind":
+        cap = min(deck_limit, 5)
+    elif status == "slipping":
+        cap = math.ceil(deck_limit / 2)
+    else:
+        cap = deck_limit
+    if hard:
+        cap = cap // 2
+    return max(0, min(deck_limit, cap))
+
+
+def catch_up_days(backlog_at_day_start: int) -> int:
+    if backlog_at_day_start <= 0:
+        return 0
+    return min(MAX_CATCH_UP_DAYS, max(1, math.ceil(backlog_at_day_start / CATCH_UP_PER_DAY)))
+
+
+def backlog_quota(backlog_at_day_start: int) -> int:
+    """Left-over cards to clear today so the backlog is gone in catch_up_days."""
+    days = catch_up_days(backlog_at_day_start)
+    return math.ceil(backlog_at_day_start / days) if days else 0
+
+
+def round_size(now: datetime, awake_end: datetime, goal_left: int, minimum: int) -> int:
+    """Cards per round: enough that today's goal fits in the rounds left before quiet
+    hours, never fewer than the user's own setting."""
+    minimum = max(1, minimum)
+    if goal_left <= 0:
+        return minimum
+    rounds_left = max(1, int((awake_end - now) / ROUND_SPACING))
+    return max(minimum, min(MAX_ROUND, math.ceil(goal_left / rounds_left)))

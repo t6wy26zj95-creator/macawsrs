@@ -119,6 +119,8 @@ CREATE TABLE IF NOT EXISTS conv_state (
     nag_texts            TEXT,                         -- JSON: recent unanswered once-a-day messages
     space_until          TEXT,                         -- the user asked for time: silent until then, then a check-in
     contact_off          INTEGER NOT NULL DEFAULT 0,   -- the user asked the bot to stop writing
+    plan_said            TEXT,                         -- "<study day>:<status>" of the plan last explained
+    pushback_day         TEXT,                         -- study day the bot last argued against a pause
     editing_proposal_id  INTEGER,
     pending_input        TEXT,                         -- JSON, e.g. {"kind": "rename_deck", "deck_id": 3}
     llm_backoff_until    TEXT
@@ -195,6 +197,8 @@ class Store:
             ("nag_texts", "TEXT"),
             ("space_until", "TEXT"),
             ("contact_off", "INTEGER NOT NULL DEFAULT 0"),
+            ("plan_said", "TEXT"),
+            ("pushback_day", "TEXT"),
         ):
             if col not in state_cols:
                 self.x(f"ALTER TABLE conv_state ADD COLUMN {col} {decl}")

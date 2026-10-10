@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, available_timezones
 
-from . import pacing, srs
+from . import pacing, plan, srs
 from .db import Store, iso, parse
 from .leak import contains_answer
 from .lookalike import find_lookalikes
@@ -177,6 +177,7 @@ class Agent:
             "It's time to bring up the active card. Ask about it naturally, as part of the "
             "conversation, without revealing the answer."
         )
+        event += self._plan_news(turn)
         return await self._run(turn, event)
 
     async def ask_now(self, user_id: int, now: datetime | None = None) -> list[Action]:
@@ -202,6 +203,7 @@ class Agent:
             "The user tapped the Next card button. Ask the active card now, naturally, "
             "without revealing the answer."
         )
+        event += self._plan_news(turn)
         return await self._run(turn, event)
 
     async def remind(self, user_id: int, now: datetime | None = None) -> list[Action]:
@@ -516,11 +518,29 @@ class Agent:
             lines.append("Your recent unanswered messages: " + " | ".join(earlier[-3:]))
         return lines
 
+    def _plan_news(self, turn: Turn) -> str:
+        """At the start of a round: the plan, if it changed since it was last explained today."""
+        uid = turn.user["id"]
+        p = plan.build(self.store, turn.user, turn.now)
+        today = srs.day_start(turn.user, turn.now).date().isoformat()
+        day, _, said = (self.store.state(uid)["plan_said"] or "").partition(":")
+        news = plan.announcement(p, said if day == today else None, turn.user["cards_per_session"])
+        self.store.update_state(uid, plan_said=f"{today}:{p.key}")
+        return f"\n\n{news}" if news else ""
+
+    def _round_target(self, turn: Turn, burst: int) -> int:
+        """Cards in this round: the plan's round size, or more if the user asked for more."""
+        p = plan.build(self.store, turn.user, turn.now)
+        return max(p.round_size, turn.user["cards_per_session"] + burst)
+
     def _end_session(self, turn: Turn) -> timedelta:
         uid = turn.user["id"]
-        remaining = len(srs.due_today(self.store, turn.user, turn.now))
+        p = plan.build(self.store, turn.user, turn.now)
+        # Rounds are spread over the rest of the day by what the plan says is left; cards
+        # beyond it (more of the backlog than today's share) still come, just less often.
+        remaining = p.goal_left or len(srs.due_today(self.store, turn.user, turn.now))
         gap = pacing.gap_until_next_session(
-            turn.now, srs.awake_end(turn.user, turn.now), remaining, turn.user["cards_per_session"]
+            turn.now, srs.awake_end(turn.user, turn.now), remaining, p.round_size
         )
         if srs.is_quiet(turn.user, turn.now):
             # A session that ends at night isn't followed by another one until morning;
@@ -641,6 +661,7 @@ class Agent:
             )
 
         lines.append(self._today_line(turn))
+        lines.append(plan.describe(plan.build(self.store, u, now), u["cards_per_session"]))
         lines.append(self._timer_line(turn, st, bool(active and self.store.card(active)), queue))
         lines.extend(self._ignored_lines(turn, st))
 
@@ -891,7 +912,7 @@ class Agent:
             store.update_state(uid, active_card_id=None, asked_at=None, session_count=count, reminders_streak=0)
             # A card done: whatever silence or space the user asked for is over.
             store.update_state(uid, ignored_since=None, nag_texts=None, space_until=None, contact_off=0)
-            target = turn.user["cards_per_session"] + st["burst"]
+            target = self._round_target(turn, st["burst"])
             # The user only came back after being reminded about this card: answering it
             # is not a sign they want a session now, so pause instead of asking the next one.
             asked, reminded_at = parse(st["asked_at"]), parse(st["last_reminder_at"])
@@ -999,12 +1020,39 @@ class Agent:
 
         async def pause_reviews(args):
             st = store.state(uid)
+            p = plan.build(store, turn.user, turn.now)
+            today = srs.day_start(turn.user, turn.now).date().isoformat()
+            if (
+                not args.get("insist")
+                and p.status in ("behind", "far_behind")
+                and not srs.is_quiet(turn.user, turn.now)
+                and st["pushback_day"] != today
+            ):
+                # Once a day, the learning manager doesn't just drop the plan: it makes its case first.
+                store.update_state(uid, pushback_day=today)
+                offer = min(3, max(1, p.goal_left))
+                return (
+                    "NOT paused yet. The user is behind (see STUDY PLAN), and as the one who owns their "
+                    "learning plan you don't just drop it. In two or three short sentences: say honestly "
+                    "what stopping now costs, using the STUDY PLAN numbers (the backlog grows, overdue "
+                    f"cards get forgotten, catching up takes longer), and offer a smaller step: just {offer} "
+                    "more cards now, then a proper break. Warm and direct, not guilt-tripping, no lecture. "
+                    + ("The open question stays open; don't ask it again in this message. " if st["active_card_id"] else "")
+                    + f"If they agree, call next_card with count={offer} and user_asked_now=true. If they "
+                    "still want to stop, respect it right away without arguing again: call pause_reviews with "
+                    "insist=true."
+                )
             self._end_session(turn)  # also withdraws the open question; the card stays due
             msg = "Paused: the code brings up the next card later on its own, spaced out over the day."
             if st["active_card_id"]:
                 msg += (
                     " The open question was withdrawn and will be asked again then; don't tell the "
                     "user they can answer it whenever."
+                )
+            if p.status in ("behind", "far_behind"):
+                msg += (
+                    " The plan stays: the rest of today's cards come in the next rounds. If you haven't "
+                    "already argued against stopping, you may say in one sentence what's still left today."
                 )
             return msg + " Acknowledge in a few words; don't mention when unless they ask."
 
@@ -1206,8 +1254,10 @@ class Agent:
             ToolSpec(
                 "pause_reviews",
                 "The user asked you to stop, pause or slow down the questions without naming a time. "
-                "Withdraws the open question and lets the code bring cards up later, spaced out.",
-                _jsonschema({}, []),
+                "Withdraws the open question and lets the code bring cards up later, spaced out. While the "
+                "user is behind, the first call of the day may answer NOT paused: make your case as it says. "
+                "insist=true when they still want to stop after that.",
+                _jsonschema({"insist": {"type": "boolean"}}, []),
                 pause_reviews,
             ),
             ToolSpec(
