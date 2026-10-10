@@ -96,7 +96,7 @@ def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
 
     row = store.day_plan(user["id"], ds.date().isoformat())
     # The user's own round size: chosen today, or kept from an earlier day (their setting).
-    user_fixed = bool(user["round_fixed"]) if "round_fixed" in user.keys() else False
+    user_fixed = bool(user["round_fixed"]) if "round_fixed" in user.keys() else False  # noqa: SIM118 (sqlite rows too)
     fixed = bool(row and row["fixed_round"]) or user_fixed
     if row and row["fixed_round"]:
         minimum = row["round_size"]
