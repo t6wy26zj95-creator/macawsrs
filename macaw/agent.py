@@ -553,19 +553,23 @@ class Agent:
             return await self._check_in(turn, event)
         self.store.update_state(uid, round_target=p.round_size)
         st = self.store.state(uid)
+        today = str(srs.day_start(turn.user, turn.now).date())
+        # The bigger round is told once a day; plan.build keeps it from shrinking after that.
+        raised_told = (st["round_said"] or "").startswith(today + ":")
         if plan.nudge_due(p, turn.now, parse(st["nudge_at"])):
-            self.store.update_state(
-                uid, nudge_at=iso(turn.now), round_said=f"{srs.day_start(turn.user, turn.now).date()}:{p.round_size}"
-            )
+            self.store.update_state(uid, nudge_at=iso(turn.now))
+            if p.round_size > p.planned_round:
+                self.store.update_state(uid, round_said=f"{today}:{p.round_size}")
             event += (
                 f"\n\nThe user is {p.behind_by} cards behind an even pace towards today's plan (see TODAY'S "
-                f"PLAN and the PROGRESS REPORT), so this round is {p.round_size} cards. Before the card, say so "
-                "in your own words in one or two sentences, like a teacher keeping a student on track: where "
-                "they are, what it means if the day slips (the cards pile onto tomorrow) and that you're asking "
-                "a few more in a row now. Encouraging, not scolding. Then ask the card."
+                "PLAN and the PROGRESS REPORT). Before the card, say so in your own words in one or two "
+                "sentences, like a teacher keeping a student on track: where they are, what it means if the "
+                "day slips (the cards pile onto tomorrow) and that you're asking a few more in a row now. "
+                "Encouraging, not scolding. Don't give a round size here, and don't revisit numbers you said "
+                "earlier. Then ask the card."
             )
-        elif p.round_size > p.planned_round and st["round_said"] != f"{srs.day_start(turn.user, turn.now).date()}:{p.round_size}":
-            self.store.update_state(uid, round_said=f"{srs.day_start(turn.user, turn.now).date()}:{p.round_size}")
+        elif p.round_size > p.planned_round and not raised_told:
+            self.store.update_state(uid, round_said=f"{today}:{p.round_size}")
             event += (
                 f"\n\nThis round is {p.round_size} cards, not the {p.planned_round} planned: what's left today "
                 "won't fit in the rounds left otherwise. Before the card, say so in one short plain sentence."

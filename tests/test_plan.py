@@ -505,3 +505,29 @@ async def test_a_card_left_open_overnight_after_studying_starts_a_fresh_morning(
     llm.script.append(morning)
     await app.tick(at("2026-10-08 06:05"))  # 08:05 in Berlin
     assert events and "daily check-in" in events[0]
+
+
+@pytest.mark.asyncio
+async def test_a_bigger_round_is_told_once_and_does_not_shrink_back(agent, llm, store, user):
+    make_deck(store, reviews_overdue=60, reviews_today=40)
+    late = NOW + timedelta(hours=9)
+    plan.set_today(store, user, NOW, 0, 3, None, "bot")
+    store.update_state(UID, nudge_at=iso(late))  # the behind-pace nudge was just given
+    events = []
+
+    def card(prompt, t):
+        events.append(prompt)
+        return _ret("What does it mean?")
+
+    llm.script.append(card)
+    await agent.ask_next(UID, late)
+    assert "This round is 6 cards, not the 3 planned" in events[-1]
+    # Most of today's cards get done: the rest would fit in smaller rounds now, but the
+    # user was told 6, so it stays 6 and isn't announced again.
+    for c in srs.due_queue(store, user, late)[:60]:
+        srs.grade(store, user, c["id"], 3, "claude", None, late)
+    store.update_state(UID, active_card_id=None, session_count=0, round_target=None)
+    assert plan.build(store, user, late).round_size == 6
+    llm.script.append(card)
+    await agent.ask_next(UID, late + timedelta(minutes=5))
+    assert "not the 3 planned" not in events[-1]
