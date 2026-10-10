@@ -1,12 +1,13 @@
 """Today's study plan: where the user stands and what the bot does about it.
 
-Everything here is computed by code from the cards and the review log; the bot
-explains the plan but never makes up its numbers.
+Everything here is computed by code from the cards and the review log. The plan
+message the user sees is written here too, so its numbers are always right; the
+bot talks about the plan but never makes up its numbers.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -23,23 +24,36 @@ class Plan:
     catch_up_days: int
     goal_left: int  # cards still to do today to keep to the plan
     round_size: int
+    cards_per_session: int  # the user's own setting
     new_left: int  # new cards still coming in today
     new_cap: int  # new cards allowed today, all decks together
     new_limit: int  # the decks' own daily new limits, together
-    pace: float  # answers a day lately
-    again_rate: float | None
-    hard: bool
+    new_reasons: list[str] = field(default_factory=list)  # backlog, hard, workload
+    pace: float = 0.0  # answers a day lately
+    again_rate: float | None = None
+    capacity: int = 0  # answers a day the plan counts on
+
+    @property
+    def bigger_rounds(self) -> bool:
+        return self.round_size > self.cards_per_session
+
+    @property
+    def fewer_new(self) -> bool:
+        return self.new_cap < self.new_limit
+
+    @property
+    def normal(self) -> bool:
+        return self.status == "on_track" and not self.bigger_rounds and not self.fewer_new
 
     @property
     def key(self) -> str:
         """Changes when the plan changes enough to tell the user about it."""
-        return self.status
+        return f"{self.status}|{int(self.bigger_rounds)}|{int(self.fewer_new)}"
 
 
 def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
     b = srs.backlog(store, user, now)
     status = srs.status_of(b)
-    hard = pacing.material_is_hard(b["again_rate"], b["studied_reviews"])
     ds = srs.day_start(user, now)
     at_start = b["overdue"] + b["overdue_done"]
     quota = pacing.backlog_quota(at_start)
@@ -51,17 +65,14 @@ def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
     left_over = sum(1 for c in queue if srs._left_over(c, ds, now))
     fresh = len(queue) - new_left - left_over + len(later)
     goal_left = fresh + overdue_left + new_left
+    new = srs.new_card_limits(store, user, now)
 
-    new_limit = new_cap = 0
-    for d in store.decks(user["id"]):
-        new_limit += d["new_per_day"]
-        new_cap += pacing.new_card_cap(d["new_per_day"], status, hard)
-
+    cps = max(1, user["cards_per_session"])
     if srs.is_quiet(user, now):
         # Studying at night is the user's choice; the plan doesn't push bigger rounds then.
-        size = max(1, user["cards_per_session"])
+        size = cps
     else:
-        size = pacing.round_size(now, srs.awake_end(user, now), goal_left, user["cards_per_session"])
+        size = pacing.round_size(now, srs.awake_end(user, now), goal_left, cps)
     return Plan(
         status=status,
         overdue=b["overdue"],
@@ -70,12 +81,14 @@ def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
         catch_up_days=pacing.catch_up_days(at_start),
         goal_left=goal_left,
         round_size=size,
+        cards_per_session=cps,
         new_left=new_left,
-        new_cap=new_cap,
-        new_limit=new_limit,
+        new_cap=new["allowed"],
+        new_limit=new["limit"],
+        new_reasons=new["reasons"],
         pace=b["pace"],
         again_rate=b["again_rate"],
-        hard=hard,
+        capacity=new["capacity"],
     )
 
 
@@ -87,31 +100,51 @@ STATUS_WORDS = {
 }
 
 
-def describe(p: Plan, cards_per_session: int) -> str:
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def _new_cards_why(p: Plan) -> str:
+    why = {
+        "backlog": "until the left-over cards are cleared",
+        "workload": "since today's reviews already make a full day and every new card brings more reviews",
+        "hard": "since a lot of cards were forgotten lately",
+    }
+    return ", and ".join(why[r] for r in p.new_reasons) or "to keep the workload steady"
+
+
+def message(p: Plan) -> str:
+    """The plan in plain words, written by code so the numbers are exact. No clock times."""
+    if p.normal:
+        if p.goal_left:
+            return f"Today's plan: {_plural(p.goal_left, 'card')} to go, nothing left over from earlier days. Normal pace."
+        return "Today's plan: all done for today, nothing left over."
+    parts = [f"Today's plan: {_plural(p.goal_left, 'card')} to go today."]
+    if p.overdue:
+        days = _plural(p.catch_up_days, "day")
+        parts.append(
+            f"You have {_plural(p.overdue, 'card')} left over from earlier days. Left alone that pile only "
+            "grows and the words get forgotten, so "
+            + ("they're all in today's number." if p.catch_up_days == 1 else
+               f"I'm clearing about {p.quota} a day (that's in today's number): about {days} to catch up.")
+        )
+    if p.fewer_new:
+        if p.new_cap == 0:
+            parts.append(f"No new cards today, {_new_cards_why(p)}.")
+        else:
+            parts.append(f"Only {p.new_cap} new cards today instead of {p.new_limit}, {_new_cards_why(p)}.")
+    if p.bigger_rounds:
+        parts.append(f"I'll ask {p.round_size} in a row each time, so it all fits in before the day ends.")
+    return " ".join(parts)
+
+
+def describe(p: Plan) -> str:
     """The STUDY PLAN line of the context."""
-    s = f"STUDY PLAN (computed by code; you own it and explain it, never change the numbers): {STATUS_WORDS[p.status]}."
-    if p.overdue_at_start:
-        s += (
-            f" Backlog: {p.overdue} cards left over from earlier days"
-            f" ({p.overdue_at_start} at the start of today). Plan: clear about {p.quota} of them a day,"
-            f" so the backlog is gone in about {p.catch_up_days} day{'s' if p.catch_up_days != 1 else ''}."
-        )
-    if p.new_cap < p.new_limit:
-        why = "the backlog" if p.status != "on_track" else "the material"
-        if p.hard and p.status != "on_track":
-            why = "the backlog and how often cards are being forgotten lately"
-        elif p.hard:
-            why = "how often cards are being forgotten lately"
-        s += (
-            f" New cards: {p.new_cap} today instead of the usual {p.new_limit}, because of {why}"
-            " (every new card brings several reviews over the next days)."
-        )
-    s += f" Still to do today to stay on plan: {p.goal_left} cards."
-    if p.round_size > cards_per_session:
-        s += (
-            f" Rounds are {p.round_size} cards in a row instead of {cards_per_session}, so today fits"
-            " before quiet hours without more interruptions."
-        )
+    s = (
+        f"STUDY PLAN (computed by code; you own it and explain it, never change the numbers): "
+        f"{STATUS_WORDS[p.status]}. In words the user has seen: \"{message(p)}\""
+    )
+    s += f" Workload the plan counts on: about {p.capacity} answers a day."
     if p.pace:
         s += f" Lately the user has done about {round(p.pace)} answers a day."
     if p.again_rate is not None:
@@ -119,37 +152,18 @@ def describe(p: Plan, cards_per_session: int) -> str:
     return s
 
 
-RANK = {"on_track": 0, "slipping": 1, "behind": 2, "far_behind": 3}
+RANK = {"on_track": 0, "slipping": 1, "behind": 2, "far_behind":3}
 
 
-def announcement(p: Plan, said: str | None, cards_per_session: int) -> str:
-    """What to tell the user at the start of a round, or "" when nothing new.
-    `said` is the plan status last explained this study day (None: nothing yet)."""
+def news(p: Plan, said: str | None) -> str:
+    """The plan message to show at the start of a round, or "" when nothing changed.
+    `said` is the plan key last shown this study day (None: nothing yet)."""
     if p.key == said:
         return ""
-    if said is not None and RANK[p.status] < RANK.get(said, 0):
-        if p.status == "on_track":
-            return (
-                "The backlog is cleared. Before the card, say so in one sentence, plainly pleased, "
-                "and that new cards are back to normal."
-            )
-        return (
-            f"Progress: the backlog is down to {p.overdue}. Before the card, say so in one short "
-            "sentence, and what that changes (see STUDY PLAN), without a speech."
-        )
-    if p.status == "on_track":
-        return ""
-    if p.status == "slipping":
-        return (
-            "A few cards were left over from earlier days. Before the card, mention in one short "
-            "sentence that you're slowing new cards a little so it doesn't build up."
-        )
-    bigger = p.round_size > cards_per_session
-    return (
-        "Before the card, tell the user today's plan in two or three short sentences, like a teacher "
-        "who has looked at their progress: how many cards are left over and why that matters (left "
-        "alone it only grows, and overdue cards get forgotten), what you're changing today ("
-        + ("bigger rounds, " if bigger else "")
-        + "fewer or no new cards until it's cleared) and how long catching up takes. Use the numbers "
-        "from STUDY PLAN only. Confident, not scolding. Then ask the card."
-    )
+    if p.normal:
+        if said is None:
+            return ""
+        return "Back on track: nothing left over from earlier days, new cards back to normal."
+    if said is not None and RANK[p.status] < RANK.get(said.split("|")[0], 0) and p.overdue:
+        return f"Progress: down to {_plural(p.overdue, 'left-over card')}. " + message(p)
+    return message(p)

@@ -104,6 +104,7 @@ class Turn:
     continued: bool = False  # a grade was followed by the next card in the same turn
     show_times: bool = False  # clock times are shown to the model only when the user asked
     lookalikes: list[dict[str, Any]] = field(default_factory=list)  # deck notes the answer resembles
+    plan_note: str = ""  # the plan message sent before the bot's reply this turn
 
 
 def _jsonschema(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -300,12 +301,15 @@ class Agent:
                 )
             )
         reply = strip_emoji(await llm.run(SYSTEM_PROMPT, prompt, tools, must_use_tool=must_use_tool))
+        if turn.plan_note:
+            turn.actions.insert(0, Text(turn.plan_note))
         if reply:
             self._postpone_leaks(turn, reply, exclude=set())
             self._postpone_named_lookalikes(turn, reply)
             # The reply normally comes first. When it already asks the next card,
             # show the grade first so it isn't read as the grade of the new question.
             pos = sum(isinstance(a, RatingNote) for a in turn.actions) if turn.continued else 0
+            pos += bool(turn.plan_note)
             turn.actions.insert(pos, Text(reply))
             self.store.log_message(uid, "bot", reply)
             self.store.update_state(uid, last_bot_at=iso(turn.now))
@@ -519,14 +523,24 @@ class Agent:
         return lines
 
     def _plan_news(self, turn: Turn) -> str:
-        """At the start of a round: the plan, if it changed since it was last explained today."""
+        """At the start of a round: show the plan when it changed since it was last shown
+        today. The message is written by code (exact numbers) and sent before the card;
+        returns what the model needs to know about it."""
         uid = turn.user["id"]
         p = plan.build(self.store, turn.user, turn.now)
         today = srs.day_start(turn.user, turn.now).date().isoformat()
         day, _, said = (self.store.state(uid)["plan_said"] or "").partition(":")
-        news = plan.announcement(p, said if day == today else None, turn.user["cards_per_session"])
+        news = plan.news(p, said if day == today else None)
         self.store.update_state(uid, plan_said=f"{today}:{p.key}")
-        return f"\n\n{news}" if news else ""
+        if not news:
+            return ""
+        turn.plan_note = news
+        self.store.log_message(uid, "bot", news)
+        return (
+            "\n\nThe code has just sent the user today's study plan as a separate message, right before "
+            f"yours: \"{news}\" Don't repeat it. If it's a big change, you may add one short sentence of "
+            "encouragement or why it matters, then ask the card."
+        )
 
     def _round_target(self, turn: Turn, burst: int) -> int:
         """Cards in this round: the plan's round size, or more if the user asked for more."""
@@ -661,7 +675,7 @@ class Agent:
             )
 
         lines.append(self._today_line(turn))
-        lines.append(plan.describe(plan.build(self.store, u, now), u["cards_per_session"]))
+        lines.append(plan.describe(plan.build(self.store, u, now)))
         lines.append(self._timer_line(turn, st, bool(active and self.store.card(active)), queue))
         lines.extend(self._ignored_lines(turn, st))
 

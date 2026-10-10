@@ -229,6 +229,7 @@ def due_queue(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict
     status = status_of(b)
     hard = pacing.material_is_hard(b["again_rate"], b["studied_reviews"])
     today = store.reviews_since(user["id"], ds)
+    reviews_done = sum(1 for r in today if r["before_state"] == REVIEW)
     new_done: dict[int, int] = {}
     rev_done: dict[int, int] = {}
     for r in today:
@@ -262,12 +263,49 @@ def due_queue(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict
         if rev_done.get(d, 0) < c["reviews_per_day"]:
             rev_done[d] = rev_done.get(d, 0) + 1
             out.append(c)
+    # New cards only while today's reviews leave room for them, all decks together.
+    room = pacing.new_card_room(reviews_done + len(review), b["pace"]) - sum(new_done.values())
     for c in new:
         d = c["deck_id"]
-        if new_done.get(d, 0) < pacing.new_card_cap(c["new_per_day"], status, hard):
+        if room > 0 and new_done.get(d, 0) < pacing.new_card_cap(c["new_per_day"], status, hard):
             new_done[d] = new_done.get(d, 0) + 1
+            room -= 1
             out.append(c)
     return out
+
+
+def new_card_limits(store: Store, user: Mapping[str, Any], now: datetime) -> dict[str, Any]:
+    """Today's new cards, all decks together: the decks' own limits, what the plan allows,
+    and why it allows fewer (backlog, material, workload)."""
+    ds = day_start(user, now)
+    b = backlog(store, user, now)
+    status = status_of(b)
+    hard = pacing.material_is_hard(b["again_rate"], b["studied_reviews"])
+    limit = capped = 0
+    for d in store.decks(user["id"]):
+        limit += d["new_per_day"]
+        capped += pacing.new_card_cap(d["new_per_day"], status, hard)
+    today = store.reviews_since(user["id"], ds)
+    load = sum(1 for r in today if r["before_state"] == REVIEW) + sum(
+        1 for c in store.user_cards(user["id"])
+        if c["state"] == REVIEW and parse(c["due"]) and parse(c["due"]) < ds + timedelta(days=1)
+        and not (parse(c["buried_until"]) and parse(c["buried_until"]) > now)
+    )
+    room = pacing.new_card_room(load, b["pace"])
+    # A limit the deck can't reach anyway (few new cards left) isn't held back by the plan.
+    new_done = sum(1 for r in today if r["before_state"] == NEW)
+    waiting = sum(1 for c in store.user_cards(user["id"]) if c["state"] == NEW)
+    limit = min(limit, new_done + waiting)
+    capped = min(capped, limit)
+    reasons = []
+    if status != "on_track" and pacing.new_card_cap(limit, status) < limit:
+        reasons.append("backlog")
+    if hard and capped < limit:
+        reasons.append("hard")
+    if room < capped:
+        reasons.append("workload")
+    return {"limit": limit, "allowed": min(capped, room), "reasons": reasons, "review_load": load,
+            "capacity": round(pacing.daily_capacity(b["pace"]))}
 
 
 def done_today(store: Store, user: Mapping[str, Any], now: datetime) -> dict[str, Any]:

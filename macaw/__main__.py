@@ -46,6 +46,7 @@ async def main() -> None:
     commands = [
         BotCommand(command="decks", description="Your decks and their settings"),
         BotCommand(command="review", description="Review a card now"),
+        BotCommand(command="plan", description="Today's study plan"),
         BotCommand(command="export", description="Export decks as an Anki file"),
         BotCommand(command="settings", description="Timezone, quiet hours, reminders"),
         BotCommand(command="model", description="Which AI model you're using"),

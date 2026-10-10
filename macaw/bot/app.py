@@ -19,7 +19,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.types import InlineKeyboardButton as Btn
 from aiogram.types import InlineKeyboardMarkup as Kb
 
-from .. import pacing, srs
+from .. import pacing, plan, srs
 from ..agent import Action, Agent, ConfirmDelete, Preview, RatingNote, Text
 from ..config import Config
 from ..db import Store, iso, parse
@@ -177,6 +177,16 @@ class App:
             self.store.ensure_user(m.from_user.id, m.chat.id, self.config.default_timezone)
             text, kb = menus.deck_list(self.store, m.from_user.id)
             await m.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+        @r.message(Command("plan"))
+        async def plan_cmd(m: Message):
+            if not self._allowed(m.from_user and m.from_user.id):
+                return
+            self.store.ensure_user(m.from_user.id, m.chat.id, self.config.default_timezone)
+            user = dict(self.store.get_user(m.from_user.id))
+            text = plan.message(plan.build(self.store, user, _now()))
+            self.store.log_message(m.from_user.id, "bot", text)
+            await m.answer(text, parse_mode=None)
 
         @r.message(Command("review"))
         async def review(m: Message):

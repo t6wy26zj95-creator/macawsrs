@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 
 from macaw import pacing, plan, srs
-from macaw.agent import Agent
+from macaw.agent import Agent, Text
 from macaw.db import iso
 
 from .conftest import UID, FakeLLM, at
@@ -110,11 +110,32 @@ def test_plan_counts_todays_share_of_the_backlog(store, user):
     assert (p.overdue, p.overdue_at_start, p.goal_left) == (43, 44, 25)
 
 
-def test_plan_line_explains_the_numbers(store, user):
+def test_plan_message_explains_the_numbers(store, user):
     make_deck(store, reviews_overdue=44, new=10)
-    line = plan.describe(plan.build(store, user, NOW), 1)
-    assert "far behind" in line and "44 cards left over" in line
-    assert "New cards: 0 today instead of the usual 20" in line
+    text = plan.message(plan.build(store, user, NOW))
+    assert text.startswith("Today's plan: 22 cards to go today.")
+    assert "You have 44 cards left over from earlier days" in text
+    assert "about 2 days to catch up" in text
+    assert "No new cards today, until the left-over cards are cleared" in text
+    assert "I'll ask 2 in a row each time" in text
+    assert "STUDY PLAN" in plan.describe(plan.build(store, user, NOW))
+
+
+def test_new_cards_held_back_when_todays_reviews_fill_the_day(store, user):
+    # Nothing left over, but 35 reviews due today: only room for a few new cards.
+    make_deck(store, reviews_today=35, new=20)
+    queue = srs.due_queue(store, user, NOW)
+    assert sum(1 for c in queue if c["state"] == srs.NEW) == 1  # (40 - 35) // 3
+    p = plan.build(store, user, NOW)
+    assert p.status == "on_track" and p.fewer_new and p.new_reasons == ["workload"]
+    assert "Only 1 new cards today instead of 20, since today's reviews already make a full day" in plan.message(p)
+
+
+def test_no_plan_news_on_a_normal_day(store, user):
+    make_deck(store, reviews_today=3, new=2)
+    p = plan.build(store, user, NOW)
+    assert p.normal
+    assert plan.news(p, None) == ""
 
 
 # ---------- the bot acting on it ----------
@@ -131,7 +152,7 @@ def agent(store, llm):
 
 
 @pytest.mark.asyncio
-async def test_plan_is_announced_once_then_again_when_it_changes(agent, llm, store, user):
+async def test_plan_is_sent_before_the_card_once_then_again_when_it_changes(agent, llm, store, user):
     make_deck(store, reviews_overdue=12)
     events = []
 
@@ -140,22 +161,25 @@ async def test_plan_is_announced_once_then_again_when_it_changes(agent, llm, sto
         return "What does w0 mean?"
 
     llm.script.append(ask)
-    await agent.ask_next(UID, NOW)
-    assert "tell the user today's plan" in events[-1]
+    actions = await agent.ask_next(UID, NOW)
+    texts = [a.text for a in actions if isinstance(a, Text)]
+    assert texts[0].startswith("Today's plan: 12 cards to go today. You have 12 cards left over")
+    assert texts[1] == "What does w0 mean?"
+    assert "Don't repeat it" in events[-1]
     assert "STUDY PLAN" in llm.prompts[-1]
 
     store.update_state(UID, active_card_id=None, asked_at=None)
     llm.script.append(ask)
-    await agent.ask_next(UID, NOW + timedelta(hours=1))
-    assert "today's plan" not in events[-1]
+    actions = await agent.ask_next(UID, NOW + timedelta(hours=1))
+    assert [a.text for a in actions if isinstance(a, Text)] == ["What does w0 mean?"]
 
-    # Down to a few left over: the improvement gets one line.
+    # Down to a few left over: the progress is shown.
     for c in srs.due_queue(store, user, NOW)[:5]:
         srs.grade(store, user, c["id"], 3, "user", None, NOW + timedelta(hours=1))
     store.update_state(UID, active_card_id=None, asked_at=None)
     llm.script.append(ask)
-    await agent.ask_next(UID, NOW + timedelta(hours=2))
-    assert "backlog is down to 7" in events[-1]
+    actions = await agent.ask_next(UID, NOW + timedelta(hours=2))
+    assert actions[0].text.startswith("Progress: down to 7 left-over cards.")
 
 
 @pytest.mark.asyncio
