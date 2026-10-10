@@ -228,8 +228,7 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
         + (
             f" (a lighter day the user asked for: at most {p.max_cards} cards in all today)."
             if p.max_cards is not None else
-            f" (today's target is all of today's scheduled cards plus about {p.quota} of the left-over "
-            "ones; any due card done counts toward it)." if p.overdue_at_start else "."
+            _made_of(p) if p.overdue_at_start else "."
         )
     )
     if srs.is_quiet(user, now) and (p.overdue or p.due_scheduled):
@@ -302,15 +301,9 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
         f"{p.suggested_new} new cards (the decks allow {p.new_limit}" + (f"; fewer because {why}" if why else "")
         + f"), {p.suggested_round} card{'s' if p.suggested_round != 1 else ''} a round"
     )
-    if p.fixed_round and p.goal_left and not srs.is_quiet(user, now):
-        rounds = max(1, int((srs.awake_end(user, now) - now) / pacing.ROUND_SPACING))
-        fits = rounds * p.round_size
-        if fits < p.goal_left:
-            lines.append(
-                f"At the {p.round_size} cards a round the user chose, the rounds left today fit about {fits} "
-                f"cards, fewer than the {p.goal_left} still to do: the rest carries over unless they take "
-                "bigger or extra rounds. Be honest about that when it comes up; don't press it every message."
-            )
+    fit = fit_note(user, now, p)
+    if fit:
+        lines.append(fit + " Be honest about that when it comes up; don't press it every message.")
     if not p.new_limit and not p.new_left:
         lines.append(
             "No new cards are waiting in the decks today, so there are no new words to hold back: "
@@ -335,6 +328,37 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
         s = f"TODAY'S PLAN: not set yet. The code suggests {suggestion}."
     lines.append(s)
     return lines
+
+
+def _made_of(p: Plan) -> str:
+    """What the still-to-do number is made of, in one plain sum."""
+    today = p.due_scheduled + p.learning + p.new_left
+    if p.goal_left == today + p.overdue_today and p.overdue_today:
+        return (
+            f" = {today} for today + {p.overdue_today} of the {p.due_left_over} left over (today's share of "
+            "the old pile; the rest comes on later days). Any due card done counts toward it. When you tell "
+            "the user, lead with the one number still to do and say what it's made of in those words; don't "
+            "list the other totals next to it."
+        )
+    return (
+        f" (today's target is all of today's scheduled cards plus about {p.quota} of the left-over "
+        "ones; any due card done counts toward it)."
+    )
+
+
+def fit_note(user: Mapping[str, Any], now: datetime, p: Plan) -> str:
+    """Says so when today's rounds left can't hold what's still to do today."""
+    if not p.has_plan or not p.goal_left or srs.is_quiet(user, now):
+        return ""
+    rounds = max(1, int((srs.awake_end(user, now) - now) / pacing.ROUND_SPACING))
+    fits = rounds * p.round_size
+    if fits >= p.goal_left:
+        return ""
+    return (
+        f"At {p.round_size} card{'s' if p.round_size != 1 else ''} a round, the rounds left today fit about "
+        f"{fits} cards, fewer than the {p.goal_left} still to do: the rest carries over to tomorrow unless "
+        "the user does extra cards (the Next card button, or asking for more)."
+    )
 
 
 def nudge_due(p: Plan, now: datetime, last_nudge: datetime | None) -> bool:

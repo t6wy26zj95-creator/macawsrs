@@ -354,7 +354,7 @@ def test_any_due_card_done_counts_toward_todays_target(store, user):
     p = plan.build(store, user, NOW)
     assert p.goal_left == 25
     line = "\n".join(plan.report(store, user, NOW, p))
-    assert "Still to do today: 25 (today's target is all of today's scheduled cards plus about 20" in line
+    assert "Still to do today: 25 = 5 for today + 20 of the 60 left over (today's share" in line
     # Doing more left-over cards than today's share still brings today's count down.
     for c in [c for c in srs.due_queue(store, user, NOW) if srs._left_over(c, srs.day_start(user, NOW), NOW)][:24]:
         srs.grade(store, user, c["id"], 3, "claude", None, NOW)

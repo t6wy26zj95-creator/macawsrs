@@ -108,6 +108,8 @@ class Turn:
     continued: bool = False  # a grade was followed by the next card in the same turn
     show_times: bool = False  # clock times are shown to the model only when the user asked
     lookalikes: list[dict[str, Any]] = field(default_factory=list)  # deck notes the answer resembles
+    prev_user_at: datetime | None = None  # the user's message or tap before this one
+    round_chosen: bool = False  # the user set the round size in this turn
 
 
 def _jsonschema(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -142,8 +144,10 @@ class Agent:
             (m["text"] for m in reversed(self.store.recent_messages(user_id, 6)) if m["role"] == "bot"), ""
         )
         self.store.log_message(user_id, "user", text)
+        prev_user_at = parse(self.store.state(user_id)["last_user_at"])
         self.store.update_state(user_id, last_user_at=iso(now), reminders_streak=0)
         turn = self._turn(user_id, now)
+        turn.prev_user_at = prev_user_at
         turn.show_times = bool(TIME_QUESTION.search(text))
         self._adopt_asked_card(turn, last_bot)
         st = self.store.state(user_id)
@@ -1011,7 +1015,10 @@ class Agent:
             # is not a sign they want a session now, so pause instead of asking the next one.
             asked, reminded_at = parse(st["asked_at"]), parse(st["last_reminder_at"])
             today = srs.day_start(turn.user, turn.now)
-            if asked and reminded_at and reminded_at >= asked and reminded_at >= today and asked >= today:
+            # Not when they've been talking since the reminder or just chose the round size.
+            back_since = turn.prev_user_at is not None and turn.prev_user_at > reminded_at if reminded_at else False
+            if (asked and reminded_at and reminded_at >= asked and reminded_at >= today and asked >= today
+                    and not back_since and not turn.round_chosen):
                 target = count
             if missed and before:
                 # The same card fell short again: teach it properly and have the user say it
@@ -1193,6 +1200,7 @@ class Agent:
             )
             turn.user.update(dict(store.get_user(uid)))
             if args.get("user_chose_round") or args.get("plan_chooses_round"):
+                turn.round_chosen = True
                 store.update_state(uid, round_target=p.round_size)  # takes effect in the round under way
             store.log_message(
                 uid, "note", f"today's plan set: {p.new_cap} new cards, {p.round_size} a round, target {p.target}"
@@ -1202,8 +1210,10 @@ class Agent:
                 if p.max_cards is not None else f" {p.target} cards to do today."
             )
             return (
-                f"Today's plan saved: {p.new_cap} new cards, {p.round_size} cards a round.{light} The code "
-                "brings up the cards by it. Tell the user about it in your own words, with these exact numbers."
+                f"Today's plan saved: {p.new_cap} new cards, {p.round_size} cards a round.{light} "
+                + (plan.fit_note(turn.user, turn.now, p) + " " if plan.fit_note(turn.user, turn.now, p) else "")
+                + "The code brings up the cards by it. Tell the user about it in your own words, with these "
+                "exact numbers."
             )
 
         async def give_space(args):
