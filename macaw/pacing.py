@@ -177,8 +177,8 @@ def should_nag(
 def nag_tone(days_ignored: int) -> str:
     if days_ignored <= 1:
         return (
-            "light and easy, no disappointment at all: missing a day is completely fine. "
-            "Just a casual nudge back to the question."
+            "light and easy, no guilt and no disappointment. Just a casual nudge back to the question "
+            "(don't say that skipping days doesn't matter)."
         )
     if days_ignored <= 3:
         return "dry and understated, a touch let down, like you noticed but are being cool about it"

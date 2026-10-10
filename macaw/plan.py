@@ -55,6 +55,7 @@ class Plan:
     behind_by: int = 0  # cards behind an even pace towards today's target (0 = on pace)
     planned_round: int = 1  # the round size the plan set (round_size may be bigger to fit the day)
     fixed_round: bool = False  # the user asked for this round size: it never grows
+    max_cards: int | None = None  # the user asked for a lighter day: at most this many cards today
 
     @property
     def has_plan(self) -> bool:
@@ -91,8 +92,20 @@ def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
     awake_end = srs.awake_end(user, now)
 
     row = store.day_plan(user["id"], ds.date().isoformat())
-    fixed = bool(row and row["fixed_round"])
-    minimum = row["round_size"] if fixed else max(cps, row["round_size"]) if row else cps
+    # The user's own round size: chosen today, or kept from an earlier day (their setting).
+    user_fixed = bool(user["round_fixed"]) if "round_fixed" in user.keys() else False
+    fixed = bool(row and row["fixed_round"]) or user_fixed
+    if row and row["fixed_round"]:
+        minimum = row["round_size"]
+    elif user_fixed:
+        minimum = cps
+    else:
+        minimum = max(cps, row["round_size"]) if row else cps
+    capped = row["max_cards"] if row and row["max_cards"] is not None else None
+    if capped is not None:
+        # A lighter day the user asked for: no more than that many cards in all today.
+        done = len(srs.done_today(store, user, now)["card_ids"])
+        goal_left = min(goal_left, max(0, capped - done))
     if srs.is_quiet(user, now) or fixed:
         # Studying at night is the user's choice, and a round size the user asked for is
         # theirs: the plan doesn't push bigger rounds then.
@@ -113,11 +126,12 @@ def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
         round_size=size,
         planned_round=minimum,
         fixed_round=fixed,
+        max_cards=capped,
         new_left=due["new"],
         new_cap=row["new_cards"] if row else limits["allowed"],
         new_limit=limits["limit"],
         suggested_new=limits["allowed"],
-        suggested_round=pacing.round_size(now, awake_end, goal_left, cps),
+        suggested_round=cps if user_fixed else pacing.round_size(now, awake_end, goal_left, cps),
         new_reasons=limits["reasons"],
         pace=b["pace"],
         again_rate=b["again_rate"],
@@ -141,15 +155,22 @@ def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
 
 
 def set_today(store: Store, user: Mapping[str, Any], now: datetime, new_cards: int, round_size: int,
-              reason: str | None, set_by: str, fixed_round: bool = False) -> Plan:
+              reason: str | None, set_by: str, fixed_round: bool = False,
+              max_cards: int | None = None) -> Plan:
     """Save today's plan, within limits, with today's target worked out from it."""
     day = srs.day_start(user, now).date().isoformat()
     limits = srs.new_card_limits(store, user, now)
     new_cards = max(0, min(int(new_cards), limits["limit"]))
     round_size = max(1, min(int(round_size), pacing.MAX_ROUND))
-    store.set_day_plan(user["id"], day, new_cards, round_size, 0, reason, set_by, now, fixed_round)
+    if fixed_round:
+        # The user's own choice of round size holds on later days too, as their setting.
+        store.update_user(user["id"], cards_per_session=round_size, round_fixed=1)
+    if max_cards is not None:
+        max_cards = max(0, int(max_cards))
+    store.set_day_plan(user["id"], day, new_cards, round_size, 0, reason, set_by, now, fixed_round, max_cards)
+    user = dict(store.get_user(user["id"]))
     target = build(store, user, now).goal_left  # what's left once the plan's new cards are counted
-    store.set_day_plan(user["id"], day, new_cards, round_size, target, reason, set_by, now, fixed_round)
+    store.set_day_plan(user["id"], day, new_cards, round_size, target, reason, set_by, now, fixed_round, max_cards)
     return build(store, user, now)
 
 
@@ -197,7 +218,8 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
     else:
         lines.append("No study history from the last 7 days yet.")
     lines.append(
-        f"Today's due cards: {p.due_left_over} left over from earlier days, {p.due_scheduled} reviews "
+        f"Today's due cards: {p.due_left_over} left over from earlier days, {p.due_scheduled} "
+        f"review{'s' if p.due_scheduled != 1 else ''} "
         f"scheduled for today, {p.learning} in learning steps (now or later today), {p.new_left} new still "
         f"to come today. Still to do today: {p.goal_left}"
         + (
@@ -206,6 +228,13 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
             if p.overdue > p.overdue_today else "."
         )
     )
+    if srs.is_quiet(user, now) and (p.overdue or p.due_scheduled):
+        start = srs.next_day_start(user, now).astimezone(tz)
+        lines.append(
+            f"It's quiet hours: the next study day starts at {start:%H:%M}. Then today's scheduled cards "
+            f"that are still undone become left over too: about {p.overdue + p.due_scheduled} left over at the "
+            "start of it, unless some are done before. Use that when talking about tomorrow or the morning."
+        )
     s = f"Overall: {STATUS_WORDS[p.status]}."
     if p.overdue_at_start and not p.overdue:
         s += f" The {p.overdue_at_start} left over at the start of today are all done."
@@ -270,15 +299,17 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
         by = "you set it" if p.set_by == "bot" else "set by the code because you didn't"
         s = f"TODAY'S PLAN ({by}): {p.new_cap} new cards, "
         if p.fixed_round:
-            s += f"{p.round_size} cards a round (the user asked for that size, so it stays); "
+            s += f"{p.round_size} cards a round (the user chose that size, so it stays); "
         elif p.round_size > p.planned_round:
             s += (
                 f"{p.round_size} cards a round now (planned {p.planned_round}; the code raised it because the "
-                "rest of today won't fit in the rounds left otherwise; tell the user if it comes up); "
+                "rest of today won't fit in the rounds left otherwise); "
             )
         else:
             s += f"{p.round_size} cards a round; "
         s += f"target when it was made: {p.target} cards."
+        if p.max_cards is not None:
+            s += f" The user asked for a lighter day: at most {p.max_cards} cards today in all."
         if p.reason:
             s += f" Your reasoning then: {p.reason}"
         if p.behind_by:
