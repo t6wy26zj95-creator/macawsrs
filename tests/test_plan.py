@@ -104,8 +104,10 @@ def test_plan_counts_todays_share_of_the_backlog(store, user):
     assert p.goal_left == 4 + 22
     assert p.suggested_round == 2  # 26 cards over the ~18 rounds left before midnight
 
-    # Doing left-over cards counts toward today's share.
-    first = srs.due_queue(store, user, NOW)[0]
+    # Today's scheduled cards come first; doing left-over cards counts toward today's share.
+    queue = srs.due_queue(store, user, NOW)
+    assert all(c["due"] > queue[-1]["due"] for c in queue[:4])
+    first = queue[-1]
     srs.grade(store, user, first["id"], 3, "claude", None, NOW)
     p = plan.build(store, user, NOW + timedelta(minutes=1))
     assert (p.overdue, p.overdue_at_start, p.goal_left) == (43, 44, 25)

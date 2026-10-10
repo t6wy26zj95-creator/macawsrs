@@ -11,6 +11,8 @@ from datetime import date, datetime, timedelta
 
 MIN_GAP = timedelta(minutes=5)
 MAX_GAP = timedelta(hours=2)
+# Between rounds the timer waits at least this long, however much is left today.
+MIN_ROUND_GAP = timedelta(minutes=30)
 # The user counts as "here" for this long after their last message, so the bot
 # keeps going at night if they chose to study then.
 ACTIVE_WINDOW = timedelta(minutes=20)

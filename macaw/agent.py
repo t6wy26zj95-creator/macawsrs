@@ -564,8 +564,9 @@ class Agent:
                 f"\n\nThe user is {p.behind_by} cards behind an even pace towards today's plan (see TODAY'S "
                 "PLAN and the PROGRESS REPORT). Before the card, say so in your own words in one or two "
                 "sentences, like a teacher keeping a student on track: where they are and what it means if "
-                "the day slips (the cards pile onto tomorrow). Encouraging, not scolding. Don't talk about "
-                "round sizes, and don't revisit numbers you said earlier. Then ask the card."
+                "the day slips (the cards pile onto tomorrow). Encouraging, not scolding. Say it plainly (\"we're "
+                "a bit behind for today\"), without the number of cards behind or talk of an \"even pace\", "
+                "round sizes, or numbers you said earlier. Then ask the card."
             )
         elif p.overdue_at_start and not p.overdue and st["plan_said"] != f"{today}:cleared":
             self.store.update_state(uid, plan_said=f"{today}:cleared")
@@ -627,6 +628,8 @@ class Agent:
         gap = pacing.gap_until_next_session(
             turn.now, srs.awake_end(turn.user, turn.now), remaining, p.round_size
         )
+        # Not a barrage late in the day: what doesn't fit carries over (the report says so).
+        gap = max(gap, pacing.MIN_ROUND_GAP)
         if p.max_cards is not None and not p.goal_left:
             # The lighter day the user asked for is done: nothing more until tomorrow.
             gap = srs.next_day_start(turn.user, turn.now) - turn.now
@@ -707,9 +710,9 @@ class Agent:
             "<context>",
             f"Now: {local:%A %Y-%m-%d %H:%M} ({u['timezone']}). Quiet hours {u['quiet_start']}-{u['quiet_end']}"
             + (" (it is quiet hours now; the user chose to be here)" if quiet else "") + ".",
-            f"Settings: usual round {u['cards_per_session']} card{'s' if u['cards_per_session'] != 1 else ''}"
-            f"{' (chosen by the user)' if u['round_fixed'] else ' (the plan for each day sets its round)'}, "
-            f"max reminders/day {u['max_reminders']}, "
+            "Settings: "
+            + (f"round size {u['cards_per_session']} (chosen by the user), " if u["round_fixed"] else "")
+            + f"max reminders/day {u['max_reminders']}, "
             f"first reminder after {u['first_reminder_min']} min, desired retention {u['desired_retention']}.",
         ]
         decks = self.store.decks(uid)
@@ -1045,8 +1048,9 @@ class Agent:
                 if nxt is not None:
                     turn.continued = True
                     return (
-                        f"Graded {srs.RATING_NAMES[rating]}. {back} Continue the session: ask this next card now, "
-                        f"in the same message, without revealing its answer:\n" + self._card_brief(nxt, True)
+                        f"Graded {srs.RATING_NAMES[rating]}. {back} Continue the session (card {count + 1} of "
+                        f"{target} in this round): ask this next card now, in the same message, without "
+                        "revealing its answer:\n" + self._card_brief(nxt, True)
                     )
             gap = self._end_session(turn)
             left = len(srs.due_today(store, turn.user, turn.now))
@@ -1156,11 +1160,15 @@ class Agent:
                 # Once a day, the learning manager doesn't just drop the plan: it makes its case first.
                 store.update_state(uid, pushback_day=today)
                 offer = min(max(p.round_size, 1), 3, max(1, p.goal_left))
+                cost = (
+                    "the backlog grows, overdue cards get forgotten, catching up takes longer"
+                    if p.status in ("behind", "far_behind") else
+                    f"the {p.goal_left} still to do today carry over to tomorrow"
+                )
                 return (
-                    "NOT paused yet. The user is behind (see the PROGRESS REPORT), and as the one who owns their "
-                    "learning plan you don't just drop it. In two or three short sentences: say honestly "
-                    "what stopping now costs, using the PROGRESS REPORT numbers (the backlog grows, overdue "
-                    f"cards get forgotten, catching up takes longer), and offer a smaller step: just {offer} "
+                    "NOT paused yet. The user is behind on today's plan (see the PROGRESS REPORT), and as the "
+                    "one who owns their learning plan you don't just drop it. In two or three short sentences: "
+                    f"say honestly what stopping now costs, using the PROGRESS REPORT numbers ({cost}), and offer a smaller step: just {offer} "
                     "more cards now, then a proper break. Warm and direct, not guilt-tripping, no lecture. "
                     + ("The open question stays open; don't ask it again in this message. " if st["active_card_id"] else "")
                     + f"If they agree, call next_card with count={offer} and user_asked_now=true. If they "

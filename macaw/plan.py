@@ -323,7 +323,6 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
             s += f" Your reasoning then: {p.reason}"
         if p.behind_by:
             s += f" The user is {p.behind_by} cards behind an even pace towards it."
-        s += f" (What the code would suggest now: {suggestion}.)"
     else:
         s = f"TODAY'S PLAN: not set yet. The code suggests {suggestion}."
     lines.append(s)
