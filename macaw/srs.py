@@ -182,7 +182,8 @@ def backlog(store: Store, user: Mapping[str, Any], now: datetime) -> dict[str, A
     overdue = studied cards left over from earlier study days,
     overdue_done = left-over cards already done today,
     pace = answers a day over the last (up to) 7 study days,
-    again_rate = share of reviews of studied cards answered Again in that time."""
+    again_rate = share of real reviews (cards out of their learning steps) answered Again
+    in that time. Misses in learning steps don't count: a word just met is often missed."""
     ds = day_start(user, now)
     overdue = sum(1 for c in store.user_cards(user["id"]) if _left_over(c, ds, now))
     week = store.reviews_since(user["id"], ds - timedelta(days=7))
@@ -198,7 +199,7 @@ def backlog(store: Store, user: Mapping[str, Any], now: datetime) -> dict[str, A
                 overdue_done += 1
         else:
             before_today.append(at)
-        if before.get("state") != NEW:
+        if before.get("state") == REVIEW:
             studied += 1
             again += r["rating"] == 1
     pace = 0.0
@@ -358,7 +359,7 @@ def history(store: Store, user: Mapping[str, Any], now: datetime, days: int = 7)
     for i, start in enumerate(starts):
         end = starts[i + 1] if i + 1 < len(starts) else today
         day = [r for r in rows if start <= parse(r["reviewed_at"]) < end]
-        studied = [r for r in day if r["before_state"] != NEW]
+        studied = [r for r in day if r["before_state"] == REVIEW]
         st = stats.get(start.date().isoformat())
         after = stats.get(end.date().isoformat())
         out.append({

@@ -273,3 +273,16 @@ async def test_no_pushback_when_on_track(agent, llm, store):
 
     llm.script.append(stop)
     await agent.on_user_message(UID, "stop", NOW + timedelta(minutes=1))
+
+
+def test_misses_in_learning_steps_dont_count_as_forgetting(store, user):
+    make_deck(store, reviews_today=1, new=3)
+    for c in srs.due_queue(store, user, NOW)[1:]:  # three brand-new words, all missed at first
+        srs.grade(store, user, c["id"], 1, "claude", None, NOW)
+        srs.grade(store, user, c["id"], 1, "claude", None, NOW + timedelta(minutes=2))
+    review = srs.due_queue(store, user, NOW)[0]
+    srs.grade(store, user, review["id"], 3, "claude", None, NOW)
+    b = srs.backlog(store, user, NOW + timedelta(minutes=5))
+    assert (b["again_rate"], b["studied_reviews"]) == (0.0, 1)
+    line = "\n".join(plan.report(store, user, NOW + timedelta(minutes=5), plan.build(store, user, NOW)))
+    assert "Forgotten lately: 0% of reviews (not counting learning steps of new words); the scheduler aims for about 10%." in line

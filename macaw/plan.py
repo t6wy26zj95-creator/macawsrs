@@ -196,7 +196,11 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
     if p.pace:
         s += f" Lately about {round(p.pace)} answers a day."
     if p.again_rate is not None:
-        s += f" Forgotten lately: {round(p.again_rate * 100)}% of reviews."
+        normal = round((1 - float(user["desired_retention"])) * 100)
+        s += (
+            f" Forgotten lately: {round(p.again_rate * 100)}% of reviews (not counting learning steps of "
+            f"new words); the scheduler aims for about {normal}%."
+        )
     lines.append(s)
 
     why = ", ".join(WHY_FEWER_NEW[r] for r in p.new_reasons)
