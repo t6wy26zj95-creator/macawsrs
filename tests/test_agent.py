@@ -954,7 +954,7 @@ async def test_context_counts_what_was_done_today(agent, llm, store):
     await agent.on_user_message(UID, "how many cards did we do today?", NOW + timedelta(minutes=1))
     prompt = llm.prompts[-1]
     assert "study day started 08:00" in prompt
-    assert "1 answers graded (1 Again) on 1 different cards, 1 of them seen for the first time: ubiquitous" in prompt
+    assert "1 answer graded (1 Again) on 1 different card (1 of them seen for the first time today): ubiquitous" in prompt
     assert "New notes: 1 added (ubiquitous)" in prompt
 
 
@@ -965,3 +965,30 @@ async def test_today_count_resets_when_quiet_hours_end(agent, llm, store, user):
     srs.grade(store, user, card["id"], 3, "user", when=late)
     assert srs.done_today(store, user, at("2026-10-08 05:00"))["reviews"] == 1  # 07:00 Berlin
     assert srs.done_today(store, user, at("2026-10-08 06:30"))["reviews"] == 0  # 08:30 Berlin
+
+
+async def test_a_plain_miss_then_a_small_gap_is_not_a_gap_that_keeps_coming_back(agent, llm, store):
+    await _make_deck_with_card(agent, llm, word="exult", meaning="to feel or show great joy after a success")
+    llm.script.append(lambda p, t: _ret("What does 'exult' mean?"))
+    await agent.ask_next(UID, NOW)
+    card_id = store.state(UID)["active_card_id"]
+
+    async def wrong(prompt, t):
+        await t["grade_card"]({"card_id": card_id, "rating": "Again", "reason": "other word", "missed": "all of it"})
+        return "Not quite."
+
+    llm.script.append(wrong)
+    await agent.on_user_message(UID, "to exclude", NOW + timedelta(minutes=1))
+    later = srs.parse(store.card(card_id)["due"]) + timedelta(minutes=1)
+    llm.script.append(lambda p, t: _ret("Back to exult?"))
+    await agent.ask_next(UID, later)
+
+    async def right(prompt, t):
+        out = await t["grade_card"](
+            {"card_id": card_id, "rating": "Good", "reason": "joy", "missed": "the success part"}
+        )
+        assert "fallen short before" not in out
+        return "Yes."
+
+    llm.script.append(right)
+    await agent.on_user_message(UID, "really happy", later + timedelta(minutes=1))

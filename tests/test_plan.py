@@ -320,3 +320,63 @@ def test_report_says_when_imported_cards_outrun_the_pace(store, user):
     line = "\n".join(plan.report(store, user, NOW, plan.build(store, user, NOW)))
     assert "more than the 2 a day done lately" in line
     assert "19 studied cards came in with an Anki import and haven't been reviewed here yet" in line
+
+
+@pytest.mark.asyncio
+async def test_done_for_today_means_nothing_more_today(agent, llm, store, user):
+    make_deck(store, reviews_today=5)
+    llm.script.append(lambda p, t: _ret("What does w0 mean?"))
+    await agent.ask_next(UID, NOW)
+
+    async def done(prompt, t):
+        out = await t["pause_reviews"]({"rest_of_day": True})
+        assert out.startswith("Paused for the rest of today")
+        return "Sure, tomorrow then."
+
+    llm.script.append(done)
+    await agent.on_user_message(UID, "im done for today", NOW + timedelta(minutes=1))
+    st = store.state(UID)
+    assert st["active_card_id"] is None
+    assert st["next_ask_at"] == iso(srs.next_day_start(user, NOW))
+
+
+def test_rounds_grow_at_most_twice_the_plan_unless_the_user_chose_them(store, user):
+    make_deck(store, reviews_overdue=60, reviews_today=40)
+    late = NOW + timedelta(hours=9)  # little of the day left for a lot of cards
+    plan.set_today(store, user, NOW, 0, 3, None, "bot")
+    p = plan.build(store, user, late)
+    assert (p.planned_round, p.round_size) == (3, 6)
+    assert "6 cards a round now (planned 3" in "\n".join(plan.report(store, user, late, p))
+    plan.set_today(store, user, NOW, 0, 3, "he wants small rounds", "bot", fixed_round=True)
+    assert plan.build(store, user, late).round_size == 3
+
+
+def test_report_says_which_left_over_cards_wait_for_later_days(store, user):
+    make_deck(store, reviews_overdue=60, reviews_today=5)
+    line = "\n".join(plan.report(store, user, NOW, plan.build(store, user, NOW)))
+    assert "Still to do today: 25 (all of today's scheduled cards plus today's share of the left-over ones; the other 40 left-over cards are for the next days)" in line
+
+
+@pytest.mark.asyncio
+async def test_more_new_cards_on_request_when_todays_are_done(agent, llm, store, user):
+    make_deck(store, new=8, new_per_day=20)
+    plan.set_today(store, user, NOW, 0, 3, None, "bot")
+
+    async def more(prompt, t):
+        out = await t["next_card"]({"count": 5, "user_asked_now": True})
+        assert "8 new cards are still waiting" in out
+        await t["set_today_plan"]({"new_cards": 5, "cards_per_round": 3})
+        out = await t["next_card"]({"count": 5, "user_asked_now": True})
+        assert out.startswith("Ask this card now")
+        return "Here's one: what does w0 mean?"
+
+    llm.script.append(more)
+    await agent.on_user_message(UID, "give me 5 more", NOW)
+
+
+@pytest.mark.asyncio
+async def test_writing_first_in_the_day_gets_the_check_in(agent, llm, store):
+    make_deck(store, reviews_overdue=12)
+    llm.script.append(lambda p, t: _ret("Morning!"))
+    await agent.on_user_message(UID, "morning", NOW)
+    assert "today's plan isn't set yet" in llm.prompts[-1]
