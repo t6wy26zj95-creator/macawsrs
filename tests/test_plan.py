@@ -504,3 +504,13 @@ async def test_a_card_left_open_overnight_after_studying_starts_a_fresh_morning(
     await app.tick(at("2026-10-08 06:05"))  # 08:05 in Berlin
     assert events and "daily check-in" in events[0]
 
+
+
+def test_the_user_can_hand_the_round_size_back_to_the_plan(store, user):
+    make_deck(store, reviews_overdue=60, reviews_today=40)
+    plan.set_today(store, user, NOW, 0, 2, "he wants small rounds", "bot", fixed_round=True)
+    assert plan.build(store, dict(store.get_user(UID)), NOW).round_size == 2
+    p = plan.set_today(store, user, NOW, 0, 99, "back to normal", "bot", plan_round=True)
+    u = dict(store.get_user(UID))
+    assert not u["round_fixed"] and not p.fixed_round
+    assert p.round_size == p.suggested_round > 2

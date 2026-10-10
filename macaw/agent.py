@@ -1189,8 +1189,10 @@ class Agent:
                 store, turn.user, turn.now, args["new_cards"], args["cards_per_round"], reason, "bot",
                 fixed_round=bool(args.get("user_chose_round")),
                 max_cards=args.get("max_cards"),
+                plan_round=bool(args.get("plan_chooses_round")),
             )
-            if args.get("user_chose_round"):
+            turn.user.update(dict(store.get_user(uid)))
+            if args.get("user_chose_round") or args.get("plan_chooses_round"):
                 store.update_state(uid, round_target=p.round_size)  # takes effect in the round under way
             store.log_message(
                 uid, "note", f"today's plan set: {p.new_cap} new cards, {p.round_size} a round, target {p.target}"
@@ -1431,11 +1433,14 @@ class Agent:
                 "is busy, has an exam, keeps up easily, or is falling behind). reason: one sentence, for "
                 "your own notes. user_chose_round=true when the user asked for this round size themselves "
                 "(the code then keeps that size, today and on later days, even if the day won't fit). "
+                "plan_chooses_round=true when the user wants to stop using their own round size and let the "
+                "plan choose it again (cards_per_round is then ignored). "
                 "max_cards: when the user wants a lighter day, the most cards to do today in all; the rest "
                 "waits for the next days.",
                 _jsonschema(
                     {"new_cards": INT, "cards_per_round": INT, "reason": STR,
-                     "user_chose_round": {"type": "boolean"}, "max_cards": INT},
+                     "user_chose_round": {"type": "boolean"}, "plan_chooses_round": {"type": "boolean"},
+                     "max_cards": INT},
                     ["new_cards", "cards_per_round"],
                 ),
                 set_today_plan,

@@ -154,9 +154,14 @@ def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
 
 def set_today(store: Store, user: Mapping[str, Any], now: datetime, new_cards: int, round_size: int,
               reason: str | None, set_by: str, fixed_round: bool = False,
-              max_cards: int | None = None) -> Plan:
-    """Save today's plan, within limits, with today's target worked out from it."""
+              max_cards: int | None = None, plan_round: bool = False) -> Plan:
+    """Save today's plan, within limits, with today's target worked out from it.
+    plan_round: the user no longer wants their own round size; the plan picks it again."""
     day = srs.day_start(user, now).date().isoformat()
+    if plan_round:
+        store.update_user(user["id"], cards_per_session=1, round_fixed=0)
+        user = dict(store.get_user(user["id"]))
+        round_size, fixed_round = build(store, user, now).suggested_round, False
     limits = srs.new_card_limits(store, user, now)
     new_cards = max(0, min(int(new_cards), limits["limit"]))
     round_size = max(1, min(int(round_size), pacing.MAX_ROUND))
