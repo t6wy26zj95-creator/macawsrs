@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS day_plans (
     set_by      TEXT NOT NULL,                         -- 'bot', or 'code' when the bot didn't set one
     created_at  TEXT NOT NULL,
     fixed_round INTEGER NOT NULL DEFAULT 0,            -- 1: the user asked for this round size; never grow it
+    max_cards   INTEGER,                               -- the user wanted a lighter day: at most this many cards
     PRIMARY KEY (user_id, day)
 );
 
@@ -204,6 +205,8 @@ class Store:
         cols = {r["name"] for r in self.q("PRAGMA table_info(users)")}
         if "llm" not in cols:
             self.x("ALTER TABLE users ADD COLUMN llm TEXT")
+        if "round_fixed" not in cols:  # 1: the user chose cards_per_session as their round size
+            self.x("ALTER TABLE users ADD COLUMN round_fixed INTEGER NOT NULL DEFAULT 0")
         note_cols = {r["name"] for r in self.q("PRAGMA table_info(notes)")}
         if "guid" not in note_cols:
             self.x("ALTER TABLE notes ADD COLUMN guid TEXT")
@@ -217,6 +220,8 @@ class Store:
         plan_cols = {r["name"] for r in self.q("PRAGMA table_info(day_plans)")}
         if "fixed_round" not in plan_cols:
             self.x("ALTER TABLE day_plans ADD COLUMN fixed_round INTEGER NOT NULL DEFAULT 0")
+        if "max_cards" not in plan_cols:
+            self.x("ALTER TABLE day_plans ADD COLUMN max_cards INTEGER")
         state_cols = {r["name"] for r in self.q("PRAGMA table_info(conv_state)")}
         for col, decl in (
             ("ignored_since", "TEXT"),
@@ -227,6 +232,8 @@ class Store:
             ("plan_said", "TEXT"),
             ("pushback_day", "TEXT"),
             ("nudge_at", "TEXT"),
+            ("round_said", "TEXT"),
+            ("round_target", "INTEGER"),
         ):
             if col not in state_cols:
                 self.x(f"ALTER TABLE conv_state ADD COLUMN {col} {decl}")
@@ -330,14 +337,15 @@ class Store:
         return self.q1("SELECT * FROM day_plans WHERE user_id=? AND day=?", (user_id, day))
 
     def set_day_plan(self, user_id: int, day: str, new_cards: int, round_size: int, target: int,
-                     reason: str | None, set_by: str, at: datetime, fixed_round: bool = False) -> None:
+                     reason: str | None, set_by: str, at: datetime, fixed_round: bool = False,
+                     max_cards: int | None = None) -> None:
         self.x(
             "INSERT INTO day_plans(user_id, day, new_cards, round_size, target, reason, set_by, created_at, "
-            "fixed_round) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id, day) DO UPDATE SET "
+            "fixed_round, max_cards) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id, day) DO UPDATE SET "
             "new_cards=excluded.new_cards, round_size=excluded.round_size, target=excluded.target, "
             "reason=excluded.reason, set_by=excluded.set_by, created_at=excluded.created_at, "
-            "fixed_round=excluded.fixed_round",
-            (user_id, day, new_cards, round_size, target, reason, set_by, iso(at), int(fixed_round)),
+            "fixed_round=excluded.fixed_round, max_cards=excluded.max_cards",
+            (user_id, day, new_cards, round_size, target, reason, set_by, iso(at), int(fixed_round), max_cards),
         )
 
     def day_stats(self, user_id: int, since_day: str) -> dict[str, sqlite3.Row]:

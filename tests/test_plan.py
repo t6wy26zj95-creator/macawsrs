@@ -351,10 +351,16 @@ def test_rounds_grow_at_most_twice_the_plan_unless_the_user_chose_them(store, us
     assert plan.build(store, user, late).round_size == 3
 
 
-def test_report_says_which_left_over_cards_wait_for_later_days(store, user):
+def test_any_due_card_done_counts_toward_todays_target(store, user):
     make_deck(store, reviews_overdue=60, reviews_today=5)
-    line = "\n".join(plan.report(store, user, NOW, plan.build(store, user, NOW)))
-    assert "Still to do today: 25 (all of today's scheduled cards plus today's share of the left-over ones; the other 40 left-over cards are for the next days)" in line
+    p = plan.build(store, user, NOW)
+    assert p.goal_left == 25
+    line = "\n".join(plan.report(store, user, NOW, p))
+    assert "Still to do today: 25 (today's target is all of today's scheduled cards plus about 20" in line
+    # Doing more left-over cards than today's share still brings today's count down.
+    for c in [c for c in srs.due_queue(store, user, NOW) if srs._left_over(c, srs.day_start(user, NOW), NOW)][:24]:
+        srs.grade(store, user, c["id"], 3, "claude", None, NOW)
+    assert plan.build(store, user, NOW + timedelta(minutes=1)).goal_left == 1
 
 
 @pytest.mark.asyncio
@@ -380,3 +386,122 @@ async def test_writing_first_in_the_day_gets_the_check_in(agent, llm, store):
     llm.script.append(lambda p, t: _ret("Morning!"))
     await agent.on_user_message(UID, "morning", NOW)
     assert "today's plan isn't set yet" in llm.prompts[-1]
+
+
+def test_a_round_size_the_user_chose_holds_on_later_days(store, user):
+    make_deck(store, reviews_overdue=60, reviews_today=40)
+    plan.set_today(store, user, NOW, 0, 2, "he asked for 2", "bot", fixed_round=True)
+    tomorrow = NOW + timedelta(days=1)
+    user = dict(store.get_user(UID))
+    p = plan.build(store, user, tomorrow + timedelta(hours=9))
+    assert (p.round_size, p.suggested_round, p.fixed_round) == (2, 2, True)
+
+
+def test_a_lighter_day_stops_at_the_cards_asked_for(store, user):
+    make_deck(store, reviews_overdue=30, reviews_today=20)
+    plan.set_today(store, user, NOW, 0, 3, "tired", "bot", max_cards=4)
+    for c in srs.due_queue(store, user, NOW)[:4]:
+        srs.grade(store, user, c["id"], 3, "claude", None, NOW)
+    p = plan.build(store, user, NOW + timedelta(minutes=1))
+    assert p.goal_left == 0
+    assert "at most 4 cards today in all" in "\n".join(plan.report(store, user, NOW, p))
+
+
+def test_quiet_hours_say_what_the_morning_will_look_like(store, user):
+    make_deck(store, reviews_overdue=10, reviews_today=5)
+    night = NOW.replace(hour=23)  # 01:00 in Berlin
+    line = "\n".join(plan.report(store, user, night, plan.build(store, user, night)))
+    assert "the next study day starts at 08:00" in line and "about 15 left over" in line
+
+
+@pytest.mark.asyncio
+async def test_stopping_for_the_day_is_not_being_ignored(agent, llm, store, user):
+    make_deck(store, reviews_today=5)
+    llm.script.append(lambda p, t: _ret("What does w0 mean?"))
+    await agent.ask_next(UID, NOW)
+
+    async def done(prompt, t):
+        await t["pause_reviews"]({"rest_of_day": True})
+        return "Tomorrow then."
+
+    llm.script.append(done)
+    await agent.on_user_message(UID, "done for today", NOW + timedelta(minutes=1))
+    assert store.state(UID)["ignored_since"] is None
+
+
+@pytest.mark.asyncio
+async def test_next_card_at_a_clock_time(agent, llm, store, user):
+    make_deck(store, reviews_today=5)
+
+    async def later(prompt, t):
+        out = await t["set_next_card_time"]({"at": "15:00"})
+        assert "at about 15:00" in out
+        return "Sure."
+
+    llm.script.append(later)
+    await agent.on_user_message(UID, "ask me at 15:00", NOW)
+    assert store.state(UID)["next_ask_at"] == iso(at("2026-10-07 13:00"))
+
+
+@pytest.mark.asyncio
+async def test_a_card_waiting_for_its_delete_button_is_not_asked(agent, llm, store, user):
+    make_deck(store, reviews_today=2)
+    first = srs.due_queue(store, user, NOW)[0]
+
+    async def delete(prompt, t):
+        await t["delete_card"]({"note_id": first["note_id"]})
+        return "Tap to confirm."
+
+    llm.script.append(delete)
+    await agent.on_user_message(UID, "delete w0", NOW)
+    assert first["id"] not in [c["id"] for c in srs.due_queue(store, user, NOW + timedelta(minutes=1))]
+
+
+@pytest.mark.asyncio
+async def test_the_lighter_day_ends_at_its_cap_mid_round(agent, llm, store, user):
+    make_deck(store, reviews_overdue=30, reviews_today=20)
+    plan.set_today(store, user, NOW, 0, 3, "tired", "bot", max_cards=1)
+    llm.script.append(lambda p, t: _ret("What does w0 mean?"))
+    await agent.ask_next(UID, NOW)
+    card_id = store.state(UID)["active_card_id"]
+
+    async def grade(prompt, t):
+        out = await t["grade_card"]({"card_id": card_id, "rating": "Good", "reason": "right"})
+        assert "Session done" in out
+        return "Right."
+
+    llm.script.append(grade)
+    await agent.on_user_message(UID, "m0", NOW + timedelta(minutes=1))
+    assert store.state(UID)["next_ask_at"] == iso(srs.next_day_start(user, NOW))
+
+
+@pytest.mark.asyncio
+async def test_a_card_left_open_overnight_after_studying_starts_a_fresh_morning(agent, llm, store, user):
+    from macaw.bot.app import App
+    from macaw.config import Config
+
+    class Bot:
+        async def send_message(self, *a, **kw):
+            class M:
+                message_id = 1
+            return M()
+
+        async def send_chat_action(self, *a, **kw):
+            pass
+
+    app = App(Config("t", frozenset({UID}), None, "UTC", "fake", None, "INFO"), store, agent, Bot())
+    make_deck(store, reviews_today=10)
+    evening = at("2026-10-07 19:00")  # 21:00 in Berlin
+    first = srs.due_queue(store, user, evening)[0]
+    srs.grade(store, user, first["id"], 3, "claude", None, evening)
+    store.update_state(UID, reminders_date="2026-10-07", active_card_id=srs.due_queue(store, user, evening)[0]["id"],
+                       asked_at=iso(evening + timedelta(minutes=30)), ignored_since=iso(evening + timedelta(minutes=30)))
+    events = []
+
+    async def morning(prompt, t):
+        events.append(prompt.split("<event>")[1])
+        return "Morning. What does w2 mean?"
+
+    llm.script.append(morning)
+    await app.tick(at("2026-10-08 06:05"))  # 08:05 in Berlin
+    assert events and "daily check-in" in events[0]
