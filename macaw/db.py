@@ -121,9 +121,32 @@ CREATE TABLE IF NOT EXISTS conv_state (
     contact_off          INTEGER NOT NULL DEFAULT 0,   -- the user asked the bot to stop writing
     plan_said            TEXT,                         -- "<study day>:<status>" of the plan last explained
     pushback_day         TEXT,                         -- study day the bot last argued against a pause
+    nudge_at             TEXT,                         -- when the bot last said the user is behind today's target
     editing_proposal_id  INTEGER,
     pending_input        TEXT,                         -- JSON, e.g. {"kind": "rename_deck", "deck_id": 3}
     llm_backoff_until    TEXT
+);
+
+-- The study plan the bot set for a study day (day = date the study day starts).
+CREATE TABLE IF NOT EXISTS day_plans (
+    user_id     INTEGER NOT NULL,
+    day         TEXT NOT NULL,
+    new_cards   INTEGER NOT NULL,                      -- new cards allowed today, all decks together
+    round_size  INTEGER NOT NULL,                      -- cards in a row each round
+    target      INTEGER NOT NULL,                      -- cards to do today when the plan was made
+    reason      TEXT,                                  -- the bot's reasoning, in its words
+    set_by      TEXT NOT NULL,                         -- 'bot', or 'code' when the bot didn't set one
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (user_id, day)
+);
+
+-- What each study day looked like when it began, for the bot's progress report.
+CREATE TABLE IF NOT EXISTS day_stats (
+    user_id     INTEGER NOT NULL,
+    day         TEXT NOT NULL,
+    due         INTEGER NOT NULL,                      -- studied cards due that day (left over included)
+    left_over   INTEGER NOT NULL,                      -- of them, left over from earlier days
+    PRIMARY KEY (user_id, day)
 );
 
 -- Friends who joined through an invite link. They use the free model only.
@@ -199,6 +222,7 @@ class Store:
             ("contact_off", "INTEGER NOT NULL DEFAULT 0"),
             ("plan_said", "TEXT"),
             ("pushback_day", "TEXT"),
+            ("nudge_at", "TEXT"),
         ):
             if col not in state_cols:
                 self.x(f"ALTER TABLE conv_state ADD COLUMN {col} {decl}")
@@ -295,6 +319,31 @@ class Store:
             self.x("INSERT INTO conv_state(user_id) VALUES (?)", (user_id,))
             row = self.q1("SELECT * FROM conv_state WHERE user_id=?", (user_id,))
         return row  # type: ignore[return-value]
+
+    # ---------- study plans ----------
+
+    def day_plan(self, user_id: int, day: str) -> sqlite3.Row | None:
+        return self.q1("SELECT * FROM day_plans WHERE user_id=? AND day=?", (user_id, day))
+
+    def set_day_plan(self, user_id: int, day: str, new_cards: int, round_size: int, target: int,
+                     reason: str | None, set_by: str, at: datetime) -> None:
+        self.x(
+            "INSERT INTO day_plans(user_id, day, new_cards, round_size, target, reason, set_by, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(user_id, day) DO UPDATE SET new_cards=excluded.new_cards, "
+            "round_size=excluded.round_size, target=excluded.target, reason=excluded.reason, "
+            "set_by=excluded.set_by, created_at=excluded.created_at",
+            (user_id, day, new_cards, round_size, target, reason, set_by, iso(at)),
+        )
+
+    def day_stats(self, user_id: int, since_day: str) -> dict[str, sqlite3.Row]:
+        rows = self.q("SELECT * FROM day_stats WHERE user_id=? AND day>=?", (user_id, since_day))
+        return {r["day"]: r for r in rows}
+
+    def record_day_stats(self, user_id: int, day: str, due: int, left_over: int) -> None:
+        self.x(
+            "INSERT OR IGNORE INTO day_stats(user_id, day, due, left_over) VALUES (?,?,?,?)",
+            (user_id, day, due, left_over),
+        )
 
     def update_state(self, user_id: int, **fields: Any) -> None:
         self.state(user_id)

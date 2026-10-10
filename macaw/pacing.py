@@ -263,3 +263,20 @@ def round_size(now: datetime, awake_end: datetime, goal_left: int, minimum: int)
         return minimum
     rounds_left = max(1, int((awake_end - now) / ROUND_SPACING))
     return max(minimum, min(MAX_ROUND, math.ceil(goal_left / rounds_left)))
+
+
+# A day's workload: new cards only come in while there is room for them. Room is what
+# the user has been managing lately (with some stretch), less the reviews already due;
+# a new card takes about three answers on its first day (its learning steps).
+MIN_CAPACITY = 40
+STRETCH = 1.5
+NEW_CARD_COST = 3
+
+
+def daily_capacity(pace: float) -> float:
+    return max(MIN_CAPACITY, STRETCH * pace)
+
+
+def new_card_room(review_load: int, pace: float) -> int:
+    """New cards that fit in today, all decks together, on top of `review_load` reviews."""
+    return max(0, int((daily_capacity(pace) - review_load) // NEW_CARD_COST))
