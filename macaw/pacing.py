@@ -195,7 +195,7 @@ def nag_tone(days_ignored: int) -> str:
 # ---------- the study plan: what to do about a backlog ----------
 # Code owns these numbers; the bot explains them. A backlog means review cards left over
 # from earlier study days. New cards slow down at the first sign of one, so it can't grow
-# quietly, and stop while it is big; rounds get bigger when today's work won't fit.
+# quietly, and stop while it is big; the day's round size is planned so today's work fits.
 
 SLIPPING_AT = 1  # any card left over from an earlier day
 BEHIND_AT = 10

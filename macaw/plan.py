@@ -53,7 +53,7 @@ class Plan:
     due_scheduled: int = 0
     learning: int = 0
     behind_by: int = 0  # cards behind an even pace towards today's target (0 = on pace)
-    planned_round: int = 1  # the round size the plan set (round_size may be bigger to fit the day)
+    planned_round: int = 1  # the round size the plan set
     fixed_round: bool = False  # the user asked for this round size: it never grows
     max_cards: int | None = None  # the user asked for a lighter day: at most this many cards today
 
@@ -109,20 +109,9 @@ def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
         # A lighter day the user asked for: no more than that many cards in all today.
         done = len(srs.done_today(store, user, now)["card_ids"])
         goal_left = min(goal_left, max(0, capped - done))
-    if srs.is_quiet(user, now) or fixed:
-        # Studying at night is the user's choice, and a round size the user asked for is
-        # theirs: the plan doesn't push bigger rounds then.
-        size = minimum
-    else:
-        # Never smaller than planned; bigger when what's left won't fit in the rounds left
-        # today, but at most twice the plan, so a slow day doesn't turn into a barrage.
-        size = min(pacing.round_size(now, awake_end, goal_left, minimum), max(minimum * 2, cps))
-        # Once the user has been told a bigger round today, it doesn't shrink back as cards get
-        # done: a round size that goes 6, 5, 6 reads like the teacher contradicting itself.
-        said = store.state(user["id"])["round_said"] or ""
-        day, _, told = said.partition(":")
-        if day == ds.date().isoformat() and told.isdigit():
-            size = max(size, int(told))
+    # The round size is set once with the day's plan and stays all day: a size that moves
+    # as cards get done or the evening comes reads like the teacher changing its mind.
+    size = minimum
 
     p = Plan(
         status=status,
@@ -327,13 +316,8 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
         s = f"TODAY'S PLAN ({by}): {p.new_cap} new cards, "
         if p.fixed_round:
             s += f"{p.round_size} cards a round (the user chose that size, so it stays); "
-        elif p.round_size > p.planned_round:
-            s += (
-                f"{p.round_size} cards a round now (planned {p.planned_round}; the code raised it because the "
-                "rest of today won't fit in the rounds left otherwise); "
-            )
         else:
-            s += f"{p.round_size} cards a round; "
+            s += f"{p.round_size} cards a round (stays all day); "
         s += f"target when it was made: {p.target} cards."
         if p.max_cards is not None:
             s += f" The user asked for a lighter day: at most {p.max_cards} cards today in all."

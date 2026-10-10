@@ -554,28 +554,17 @@ class Agent:
         self.store.update_state(uid, round_target=p.round_size)
         st = self.store.state(uid)
         today = str(srs.day_start(turn.user, turn.now).date())
-        # The bigger round is told once a day; plan.build keeps it from shrinking after that.
-        raised_told = (st["round_said"] or "").startswith(today + ":")
         if plan.nudge_due(p, turn.now, parse(st["nudge_at"])):
             self.store.update_state(uid, nudge_at=iso(turn.now))
-            if p.round_size > p.planned_round:
-                self.store.update_state(uid, round_said=f"{today}:{p.round_size}")
             event += (
                 f"\n\nThe user is {p.behind_by} cards behind an even pace towards today's plan (see TODAY'S "
                 "PLAN and the PROGRESS REPORT). Before the card, say so in your own words in one or two "
-                "sentences, like a teacher keeping a student on track: where they are, what it means if the "
-                "day slips (the cards pile onto tomorrow) and that you're asking a few more in a row now. "
-                "Encouraging, not scolding. Don't give a round size here, and don't revisit numbers you said "
-                "earlier. Then ask the card."
+                "sentences, like a teacher keeping a student on track: where they are and what it means if "
+                "the day slips (the cards pile onto tomorrow). Encouraging, not scolding. Don't talk about "
+                "round sizes, and don't revisit numbers you said earlier. Then ask the card."
             )
-        elif p.round_size > p.planned_round and not raised_told:
-            self.store.update_state(uid, round_said=f"{today}:{p.round_size}")
-            event += (
-                f"\n\nThis round is {p.round_size} cards, not the {p.planned_round} planned: what's left today "
-                "won't fit in the rounds left otherwise. Before the card, say so in one short plain sentence."
-            )
-        elif p.overdue_at_start and not p.overdue and st["plan_said"] != f"{srs.day_start(turn.user, turn.now).date()}:cleared":
-            self.store.update_state(uid, plan_said=f"{srs.day_start(turn.user, turn.now).date()}:cleared")
+        elif p.overdue_at_start and not p.overdue and st["plan_said"] != f"{today}:cleared":
+            self.store.update_state(uid, plan_said=f"{today}:cleared")
             event += (
                 "\n\nAll the cards left over from earlier days are done (since you last said anything about "
                 "it). Before the card, say so in one short sentence, plainly pleased."
@@ -714,8 +703,8 @@ class Agent:
             "<context>",
             f"Now: {local:%A %Y-%m-%d %H:%M} ({u['timezone']}). Quiet hours {u['quiet_start']}-{u['quiet_end']}"
             + (" (it is quiet hours now; the user chose to be here)" if quiet else "") + ".",
-            f"Settings: smallest round {u['cards_per_session']} card{'s' if u['cards_per_session'] != 1 else ''}"
-            f"{' (chosen by the user)' if u['round_fixed'] else ' (the plan sets the actual round)'}, "
+            f"Settings: usual round {u['cards_per_session']} card{'s' if u['cards_per_session'] != 1 else ''}"
+            f"{' (chosen by the user)' if u['round_fixed'] else ' (the plan for each day sets its round)'}, "
             f"max reminders/day {u['max_reminders']}, "
             f"first reminder after {u['first_reminder_min']} min, desired retention {u['desired_retention']}.",
         ]
@@ -1206,17 +1195,12 @@ class Agent:
             store.log_message(
                 uid, "note", f"today's plan set: {p.new_cap} new cards, {p.round_size} a round, target {p.target}"
             )
-            grew = (
-                f" (you asked for {p.planned_round}; the code needs {p.round_size} for the rest of today to "
-                "fit in the rounds left; it stays at what you asked only if the user chose the size, "
-                "user_chose_round=true)" if p.round_size > p.planned_round else ""
-            )
             light = (
                 f" A lighter day: at most {p.max_cards} cards in all today, so {p.target} still to do."
                 if p.max_cards is not None else f" {p.target} cards to do today."
             )
             return (
-                f"Today's plan saved: {p.new_cap} new cards, {p.round_size} cards a round{grew}.{light} The code "
+                f"Today's plan saved: {p.new_cap} new cards, {p.round_size} cards a round.{light} The code "
                 "brings up the cards by it. Tell the user about it in your own words, with these exact numbers."
             )
 
