@@ -618,8 +618,8 @@ class Agent:
         """Cards in this round: the plan's round size when the round began (so a round
         announced as five stays five), or more if the user asked for more."""
         p = plan.build(self.store, turn.user, turn.now)
-        began = self.store.state(turn.user["id"])["round_target"] or 0
-        return max(p.round_size, began, turn.user["cards_per_session"] + burst)
+        began = self.store.state(turn.user["id"])["round_target"]
+        return max(began or p.round_size, turn.user["cards_per_session"] + burst)
 
     def _end_session(self, turn: Turn) -> timedelta:
         uid = turn.user["id"]
@@ -710,7 +710,9 @@ class Agent:
             "<context>",
             f"Now: {local:%A %Y-%m-%d %H:%M} ({u['timezone']}). Quiet hours {u['quiet_start']}-{u['quiet_end']}"
             + (" (it is quiet hours now; the user chose to be here)" if quiet else "") + ".",
-            f"Settings: cards per session {u['cards_per_session']}, max reminders/day {u['max_reminders']}, "
+            f"Settings: smallest round {u['cards_per_session']} card{'s' if u['cards_per_session'] != 1 else ''}"
+            f"{' (chosen by the user)' if u['round_fixed'] else ' (the plan sets the actual round)'}, "
+            f"max reminders/day {u['max_reminders']}, "
             f"first reminder after {u['first_reminder_min']} min, desired retention {u['desired_retention']}.",
         ]
         decks = self.store.decks(uid)
@@ -971,7 +973,10 @@ class Agent:
             # Not asked while the delete waits for its button (it comes back another day if they cancel).
             for c in store.cards_for_note(note["id"]):
                 self._postpone(turn, c["id"], "waiting for the delete button")
-            return "The user was asked to confirm the deletion with a button. Its cards won't be asked meanwhile."
+            return (
+                "A message with a delete button will appear right after your reply; the user confirms there. "
+                "Its cards won't be asked meanwhile."
+            )
 
         async def grade_card(args):
             st = store.state(uid)
@@ -1012,7 +1017,8 @@ class Agent:
             # The user only came back after being reminded about this card: answering it
             # is not a sign they want a session now, so pause instead of asking the next one.
             asked, reminded_at = parse(st["asked_at"]), parse(st["last_reminder_at"])
-            if asked and reminded_at and reminded_at >= asked:
+            today = srs.day_start(turn.user, turn.now)
+            if asked and reminded_at and reminded_at >= asked and reminded_at >= today and asked >= today:
                 target = count
             if missed and before:
                 # The same card fell short again: teach it properly and have the user say it
@@ -1031,6 +1037,9 @@ class Agent:
                     "another card in this message; the code brings the next one up after they reply. "
                     "Their reply is not graded: confirm it or gently fill what's still missing."
                 )
+            capped = plan.build(store, turn.user, turn.now)
+            if capped.max_cards is not None and not capped.goal_left:
+                target = count  # the lighter day the user asked for is done
             if count < target:
                 nxt = self._activate_next(turn)
                 if nxt is not None:
@@ -1198,10 +1207,13 @@ class Agent:
                 "fit in the rounds left; it stays at what you asked only if the user chose the size, "
                 "user_chose_round=true)" if p.round_size > p.planned_round else ""
             )
+            light = (
+                f" A lighter day: at most {p.max_cards} cards in all today, so {p.target} still to do."
+                if p.max_cards is not None else f" {p.target} cards to do today."
+            )
             return (
-                f"Today's plan saved: {p.new_cap} new cards, {p.round_size} cards a round{grew}, {p.target} "
-                "cards to do today. The code brings up the cards by it. Tell the user about it in your own "
-                "words, with these exact numbers."
+                f"Today's plan saved: {p.new_cap} new cards, {p.round_size} cards a round{grew}.{light} The code "
+                "brings up the cards by it. Tell the user about it in your own words, with these exact numbers."
             )
 
         async def give_space(args):

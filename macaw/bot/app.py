@@ -561,6 +561,22 @@ class App:
             async with lock:
                 await self._tick_user(dict(user), now)
 
+    def _fresh_morning(self, user: dict[str, Any], now: datetime, st: Any) -> None:
+        """A card asked late yesterday, after the user had been studying that day, and
+        left open overnight isn't being ignored: withdraw it, so the new day starts with
+        the check-in instead of an 'ignored' message (it stays due and comes up again)."""
+        asked = parse(st["asked_at"])
+        start = srs.day_start(user, now)
+        if not st["active_card_id"] or asked is None or asked >= start or st["reminders_streak"] > 1:
+            return
+        yesterday = srs.day_start(user, start - timedelta(hours=12))
+        studied = any(parse(r["reviewed_at"]) < start for r in self.store.reviews_since(user["id"], yesterday))
+        if studied:
+            self.store.update_state(
+                user["id"], active_card_id=None, asked_at=None, session_count=0, burst=0, round_target=None,
+                ignored_since=None, nag_texts=None, next_ask_at=None,
+            )
+
     async def _tick_user(self, user: dict[str, Any], now: datetime) -> None:
         uid = user["id"]
         st = self.store.state(uid)
@@ -571,6 +587,7 @@ class App:
         today = srs.day_start(user, now).date().isoformat()
         if st["reminders_date"] != today:
             self.store.update_state(uid, reminders_date=today, reminders_today=0)
+            self._fresh_morning(user, now, st)
             srs.snapshot_day(self.store, user, now)  # how the day looks as it begins, for the progress report
             st = self.store.state(uid)
         quiet = srs.is_quiet(user, now)

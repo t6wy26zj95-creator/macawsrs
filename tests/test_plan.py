@@ -455,3 +455,53 @@ async def test_a_card_waiting_for_its_delete_button_is_not_asked(agent, llm, sto
     llm.script.append(delete)
     await agent.on_user_message(UID, "delete w0", NOW)
     assert first["id"] not in [c["id"] for c in srs.due_queue(store, user, NOW + timedelta(minutes=1))]
+
+
+@pytest.mark.asyncio
+async def test_the_lighter_day_ends_at_its_cap_mid_round(agent, llm, store, user):
+    make_deck(store, reviews_overdue=30, reviews_today=20)
+    plan.set_today(store, user, NOW, 0, 3, "tired", "bot", max_cards=1)
+    llm.script.append(lambda p, t: _ret("What does w0 mean?"))
+    await agent.ask_next(UID, NOW)
+    card_id = store.state(UID)["active_card_id"]
+
+    async def grade(prompt, t):
+        out = await t["grade_card"]({"card_id": card_id, "rating": "Good", "reason": "right"})
+        assert "Session done" in out
+        return "Right."
+
+    llm.script.append(grade)
+    await agent.on_user_message(UID, "m0", NOW + timedelta(minutes=1))
+    assert store.state(UID)["next_ask_at"] == iso(srs.next_day_start(user, NOW))
+
+
+@pytest.mark.asyncio
+async def test_a_card_left_open_overnight_after_studying_starts_a_fresh_morning(agent, llm, store, user):
+    from macaw.bot.app import App
+    from macaw.config import Config
+
+    class Bot:
+        async def send_message(self, *a, **kw):
+            class M:
+                message_id = 1
+            return M()
+
+        async def send_chat_action(self, *a, **kw):
+            pass
+
+    app = App(Config("t", frozenset({UID}), None, "UTC", "fake", None, "INFO"), store, agent, Bot())
+    make_deck(store, reviews_today=10)
+    evening = at("2026-10-07 19:00")  # 21:00 in Berlin
+    first = srs.due_queue(store, user, evening)[0]
+    srs.grade(store, user, first["id"], 3, "claude", None, evening)
+    store.update_state(UID, reminders_date="2026-10-07", active_card_id=srs.due_queue(store, user, evening)[0]["id"],
+                       asked_at=iso(evening + timedelta(minutes=30)), ignored_since=iso(evening + timedelta(minutes=30)))
+    events = []
+
+    async def morning(prompt, t):
+        events.append(prompt.split("<event>")[1])
+        return "Morning. What does w2 mean?"
+
+    llm.script.append(morning)
+    await app.tick(at("2026-10-08 06:05"))  # 08:05 in Berlin
+    assert events and "daily check-in" in events[0]

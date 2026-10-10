@@ -226,6 +226,8 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
         f"scheduled for today, {p.learning} in learning steps (now or later today), {p.new_left} new still "
         f"to come today. Still to do today: {p.goal_left}"
         + (
+            f" (a lighter day the user asked for: at most {p.max_cards} cards in all today)."
+            if p.max_cards is not None else
             f" (today's target is all of today's scheduled cards plus about {p.quota} of the left-over "
             "ones; any due card done counts toward it)." if p.overdue_at_start else "."
         )
@@ -235,7 +237,9 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
         lines.append(
             f"It's quiet hours: the next study day starts at {start:%H:%M}. Then today's scheduled cards "
             f"that are still undone become left over too: about {p.overdue + p.due_scheduled} left over at the "
-            "start of it, unless some are done before. Use that when talking about tomorrow or the morning."
+            "start of it, unless some are done before. The rest of this report is about the study day that's "
+            "ending; when the new one starts, today's target and plan are worked out again from those numbers. "
+            "Use that when talking about tomorrow or the morning, and don't promise the new day's numbers yet."
         )
     s = f"Overall: {STATUS_WORDS[p.status]}."
     if p.overdue_at_start and not p.overdue:
@@ -267,6 +271,12 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
                 f" From how long each card had waited, the scheduler expected about "
                 f"{round(p.expected_again * 100)}%; on cards reviewed on time it aims for about {normal}%."
             )
+    if p.overdue_at_start:
+        s += (
+            " Left over is counted fresh each morning: whatever of a day's scheduled cards isn't done becomes "
+            "left over the next day, so a day that clears the old pile can still leave a new one. Progress "
+            "shows in the daily record above (done against due), not only in this number."
+        )
     lines.append(s)
 
     ahead = srs.upcoming(store, user, now)
@@ -292,6 +302,15 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
         f"{p.suggested_new} new cards (the decks allow {p.new_limit}" + (f"; fewer because {why}" if why else "")
         + f"), {p.suggested_round} card{'s' if p.suggested_round != 1 else ''} a round"
     )
+    if p.fixed_round and p.goal_left and not srs.is_quiet(user, now):
+        rounds = max(1, int((srs.awake_end(user, now) - now) / pacing.ROUND_SPACING))
+        fits = rounds * p.round_size
+        if fits < p.goal_left:
+            lines.append(
+                f"At the {p.round_size} cards a round the user chose, the rounds left today fit about {fits} "
+                f"cards, fewer than the {p.goal_left} still to do: the rest carries over unless they take "
+                "bigger or extra rounds. Be honest about that when it comes up; don't press it every message."
+            )
     if not p.new_limit and not p.new_left:
         lines.append(
             "No new cards are waiting in the decks today, so there are no new words to hold back: "
