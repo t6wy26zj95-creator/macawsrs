@@ -193,7 +193,7 @@ class App:
             await m.answer(
                 f"Timezone: {u['timezone']}\n"
                 f"Quiet hours: {u['quiet_start']}–{u['quiet_end']}\n"
-                f"Cards per session: {u['cards_per_session']}\n"
+                f"Cards per session: {u['cards_per_session']} (more while catching up on a backlog)\n"
                 f"Reminders: up to {u['max_reminders']} a day, first after {u['first_reminder_min']} min\n"
                 f"Desired retention: {u['desired_retention']}\n"
                 f"{off}\n"
