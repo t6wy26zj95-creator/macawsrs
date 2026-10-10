@@ -60,6 +60,10 @@ TIME_QUESTION = re.compile(
 NOTHING_MISSED = re.compile(r"^\W*(?:none|nothing|n/?a|no|nil|complete|-+)?\W*$", re.I)
 
 
+def _n(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
 def clean_missed(text: Any) -> str:
     text = strip_emoji(str(text or ""))
     return "" if NOTHING_MISSED.match(text) else text
@@ -164,6 +168,21 @@ class Agent:
                 f"\n\n(The user is editing card preview #{st['editing_proposal_id']}; "
                 "if this message describes changes, call revise_proposal.)"
             )
+        first_today = (
+            not srs.is_quiet(turn.user, now)
+            and bool(srs.due_queue(self.store, turn.user, now))
+            and not plan.build(self.store, turn.user, now).has_plan
+        )
+        if first_today:
+            # They wrote before the first round of the day: the check-in comes now, with the reply.
+            srs.snapshot_day(self.store, turn.user, now)
+            event += (
+                "\n\nThis is the first talk of the study day and today's plan isn't set yet. Also call "
+                "set_today_plan (read the PROGRESS REPORT; the code's suggestion is a sound default), and "
+                "after dealing with their message, give the day's check-in in two or three short sentences "
+                "of your own: how the last days went and today's plan with its numbers."
+            )
+        # If the model sets no plan here, the check-in still comes with the next round.
         return await self._run(turn, event, must_use_tool=answering)
 
     async def ask_next(self, user_id: int, now: datetime | None = None) -> list[Action]:
@@ -481,8 +500,8 @@ class Agent:
         else:
             grades = ", ".join(f"{n} {name}" for name, n in d["grades"].items() if n)
             done = (
-                f"{d['reviews']} answers graded ({grades}) on {len(d['card_ids'])} different cards, "
-                f"{d['first_time']} of them seen for the first time"
+                f"{_n(d['reviews'], 'answer')} graded ({grades}) on {_n(len(d['card_ids']), 'different card')} "
+                f"({d['first_time']} of them seen for the first time today)"
             )
             names = []
             for cid in d["card_ids"][:DUE_LIST_LIMIT * 2]:
@@ -545,8 +564,8 @@ class Agent:
         elif p.overdue_at_start and not p.overdue and st["plan_said"] != f"{srs.day_start(turn.user, turn.now).date()}:cleared":
             self.store.update_state(uid, plan_said=f"{srs.day_start(turn.user, turn.now).date()}:cleared")
             event += (
-                "\n\nAll the cards left over from earlier days are done now. Before the card, say so in one "
-                "short sentence, plainly pleased."
+                "\n\nAll the cards left over from earlier days are done (since you last said anything about "
+                "it). Before the card, say so in one short sentence, plainly pleased."
             )
         return await self._run(turn, event)
 
@@ -954,7 +973,8 @@ class Agent:
             missed = clean_missed(args.get("missed"))
             if not missed and rating <= srs.RATING_BY_NAME["hard"] and reason:
                 missed = reason  # a model that skipped the field: the reason says what went wrong
-            before = [r["missed"] for r in store.answer_history(card_id) if r["missed"]]
+            # Gaps in answers that were partly right; a plain miss (Again) isn't a gap that keeps coming back.
+            before = [r["missed"] for r in store.answer_history(card_id) if r["missed"] and r["rating"] >= 2]
             log_id = srs.grade(store, turn.user, card_id, rating, "claude", reason, turn.now, missed)
             tz = srs.tz_of(turn.user)
             back = (
@@ -1002,6 +1022,7 @@ class Agent:
                     )
             gap = self._end_session(turn)
             left = len(srs.due_today(store, turn.user, turn.now))
+            goal = plan.build(store, turn.user, turn.now).goal_left
             if srs.due_queue(store, turn.user, turn.now):
                 note = next(a for a in turn.actions if isinstance(a, RatingNote) and a.log_id == log_id)
                 note.offer_next = True
@@ -1010,9 +1031,13 @@ class Agent:
                 if turn.show_times:
                     at = (turn.now + gap).astimezone(tz).strftime("%H:%M")
                     when = f" at about {at} (the user asked about timing; give that exact time)"
+                left_s = (
+                    f"{goal} still to do today by the plan ({left} due in all; the rest of the left-over "
+                    "cards are for the next days)" if goal < left else f"{left} card{'s' if left != 1 else ''} left today"
+                )
                 return (
                     f"Graded {srs.RATING_NAMES[rating]}. {back} Session done: do NOT ask another card now. "
-                    f"{left} cards left today; the code brings up the next one on its own{when}."
+                    f"{left_s}; the code brings up the next one on its own{when}."
                 )
             return f"Graded {srs.RATING_NAMES[rating]}. {back} That was the last card due for now. Do not ask another."
 
@@ -1072,6 +1097,14 @@ class Agent:
             )
             card = self._activate_next(turn)
             if card is None:
+                waiting = sum(1 for c in store.user_cards(uid) if c["state"] == srs.NEW)
+                if waiting:
+                    return (
+                        f"Nothing is due right now, and today's new cards are done. {waiting} new cards are "
+                        "still waiting in the decks: if the user wants more, call set_today_plan with more "
+                        "new cards (keeping in mind each one brings reviews over the next days), then "
+                        "next_card again."
+                    )
                 return "Nothing is due right now. Tell the user they're all caught up (or offer to add new cards)."
             return "Ask this card now, without revealing the answer:\n" + self._card_brief(card, True)
 
@@ -1097,9 +1130,16 @@ class Agent:
                     + ("The open question stays open; don't ask it again in this message. " if st["active_card_id"] else "")
                     + f"If they agree, call next_card with count={offer} and user_asked_now=true. If they "
                     "still want to stop, respect it right away without arguing again: call pause_reviews with "
-                    "insist=true."
+                    "insist=true (and rest_of_day=true if they're done for today)."
                 )
             self._end_session(turn)  # also withdraws the open question; the card stays due
+            if args.get("rest_of_day") and not srs.is_quiet(turn.user, turn.now):
+                store.update_state(uid, next_ask_at=iso(srs.next_day_start(turn.user, turn.now)))
+                return (
+                    "Paused for the rest of today: no more cards or reminders until the next study day "
+                    "starts in the morning. The open question, if any, was withdrawn. Acknowledge in a few "
+                    "words; you may say you'll pick it up tomorrow."
+                )
             msg = "Paused: the code brings up the next card later on its own, spaced out over the day."
             if st["active_card_id"]:
                 msg += (
@@ -1116,14 +1156,21 @@ class Agent:
         async def set_today_plan(args):
             reason = strip_emoji(args.get("reason") or "") or None
             p = plan.set_today(
-                store, turn.user, turn.now, args["new_cards"], args["cards_per_round"], reason, "bot"
+                store, turn.user, turn.now, args["new_cards"], args["cards_per_round"], reason, "bot",
+                fixed_round=bool(args.get("user_chose_round")),
             )
             store.log_message(
                 uid, "note", f"today's plan set: {p.new_cap} new cards, {p.round_size} a round, target {p.target}"
             )
+            grew = (
+                f" (you asked for {p.planned_round}; the code needs {p.round_size} for the rest of today to "
+                "fit in the rounds left; it stays at what you asked only if the user chose the size, "
+                "user_chose_round=true)" if p.round_size > p.planned_round else ""
+            )
             return (
-                f"Today's plan saved: {p.new_cap} new cards, {p.round_size} cards a round, {p.target} cards "
-                "to do today. The code brings up the cards by it. Tell the user about it in your own words."
+                f"Today's plan saved: {p.new_cap} new cards, {p.round_size} cards a round{grew}, {p.target} "
+                "cards to do today. The code brings up the cards by it. Tell the user about it in your own "
+                "words, with these exact numbers."
             )
 
         async def give_space(args):
@@ -1324,10 +1371,12 @@ class Agent:
             ToolSpec(
                 "pause_reviews",
                 "The user asked you to stop, pause or slow down the questions without naming a time. "
-                "Withdraws the open question and lets the code bring cards up later, spaced out. While the "
-                "user is behind, the first call of the day may answer NOT paused: make your case as it says. "
-                "insist=true when they still want to stop after that.",
-                _jsonschema({"insist": {"type": "boolean"}}, []),
+                "Withdraws the open question and lets the code bring cards up later, spaced out. "
+                "rest_of_day=true when they're done for today ('I'm done for today', 'no more today'): "
+                "then nothing comes until tomorrow. While the user is behind, the first call of the day may "
+                "answer NOT paused: make your case as it says. insist=true when they still want to stop "
+                "after that.",
+                _jsonschema({"insist": {"type": "boolean"}, "rest_of_day": {"type": "boolean"}}, []),
                 pause_reviews,
             ),
             ToolSpec(
@@ -1336,8 +1385,12 @@ class Agent:
                 "and how many cards to ask in a row each round. Use the PROGRESS REPORT and the code's "
                 "suggestion; call it at the daily check-in, or later when the plan should change (the user "
                 "is busy, has an exam, keeps up easily, or is falling behind). reason: one sentence, for "
-                "your own notes.",
-                _jsonschema({"new_cards": INT, "cards_per_round": INT, "reason": STR}, ["new_cards", "cards_per_round"]),
+                "your own notes. user_chose_round=true when the user asked for this round size themselves "
+                "(the code then never makes the rounds bigger today, even if the day won't fit).",
+                _jsonschema(
+                    {"new_cards": INT, "cards_per_round": INT, "reason": STR, "user_chose_round": {"type": "boolean"}},
+                    ["new_cards", "cards_per_round"],
+                ),
                 set_today_plan,
             ),
             ToolSpec(

@@ -28,6 +28,7 @@ class Plan:
     overdue: int  # studied cards left over from earlier days, still undone
     overdue_at_start: int  # how many there were when today began
     quota: int  # left-over cards to clear today
+    overdue_today: int  # of those, still to do today
     catch_up_days: int
     goal_left: int  # cards still to do today
     round_size: int
@@ -52,6 +53,8 @@ class Plan:
     due_scheduled: int = 0
     learning: int = 0
     behind_by: int = 0  # cards behind an even pace towards today's target (0 = on pace)
+    planned_round: int = 1  # the round size the plan set (round_size may be bigger to fit the day)
+    fixed_round: bool = False  # the user asked for this round size: it never grows
 
     @property
     def has_plan(self) -> bool:
@@ -88,22 +91,28 @@ def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
     awake_end = srs.awake_end(user, now)
 
     row = store.day_plan(user["id"], ds.date().isoformat())
-    minimum = max(cps, row["round_size"]) if row else cps
-    if srs.is_quiet(user, now):
-        # Studying at night is the user's choice; the plan doesn't push bigger rounds then.
+    fixed = bool(row and row["fixed_round"])
+    minimum = row["round_size"] if fixed else max(cps, row["round_size"]) if row else cps
+    if srs.is_quiet(user, now) or fixed:
+        # Studying at night is the user's choice, and a round size the user asked for is
+        # theirs: the plan doesn't push bigger rounds then.
         size = minimum
     else:
-        # Never smaller than planned; bigger when what's left won't fit in the rounds left today.
-        size = pacing.round_size(now, awake_end, goal_left, minimum)
+        # Never smaller than planned; bigger when what's left won't fit in the rounds left
+        # today, but at most twice the plan, so a slow day doesn't turn into a barrage.
+        size = min(pacing.round_size(now, awake_end, goal_left, minimum), max(minimum * 2, cps))
 
     p = Plan(
         status=status,
         overdue=b["overdue"],
         overdue_at_start=at_start,
         quota=quota,
+        overdue_today=overdue_left,
         catch_up_days=pacing.catch_up_days(at_start),
         goal_left=goal_left,
         round_size=size,
+        planned_round=minimum,
+        fixed_round=fixed,
         new_left=due["new"],
         new_cap=row["new_cards"] if row else limits["allowed"],
         new_limit=limits["limit"],
@@ -132,15 +141,15 @@ def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
 
 
 def set_today(store: Store, user: Mapping[str, Any], now: datetime, new_cards: int, round_size: int,
-              reason: str | None, set_by: str) -> Plan:
+              reason: str | None, set_by: str, fixed_round: bool = False) -> Plan:
     """Save today's plan, within limits, with today's target worked out from it."""
     day = srs.day_start(user, now).date().isoformat()
     limits = srs.new_card_limits(store, user, now)
     new_cards = max(0, min(int(new_cards), limits["limit"]))
     round_size = max(1, min(int(round_size), pacing.MAX_ROUND))
-    store.set_day_plan(user["id"], day, new_cards, round_size, 0, reason, set_by, now)
+    store.set_day_plan(user["id"], day, new_cards, round_size, 0, reason, set_by, now, fixed_round)
     target = build(store, user, now).goal_left  # what's left once the plan's new cards are counted
-    store.set_day_plan(user["id"], day, new_cards, round_size, target, reason, set_by, now)
+    store.set_day_plan(user["id"], day, new_cards, round_size, target, reason, set_by, now, fixed_round)
     return build(store, user, now)
 
 
@@ -190,10 +199,17 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
     lines.append(
         f"Today's due cards: {p.due_left_over} left over from earlier days, {p.due_scheduled} reviews "
         f"scheduled for today, {p.learning} in learning steps (now or later today), {p.new_left} new still "
-        f"to come today. Still to do today: {p.goal_left}."
+        f"to come today. Still to do today: {p.goal_left}"
+        + (
+            f" (all of today's scheduled cards plus today's share of the left-over ones; the other "
+            f"{p.overdue - p.overdue_today} left-over cards are for the next days)."
+            if p.overdue > p.overdue_today else "."
+        )
     )
     s = f"Overall: {STATUS_WORDS[p.status]}."
-    if p.overdue_at_start:
+    if p.overdue_at_start and not p.overdue:
+        s += f" The {p.overdue_at_start} left over at the start of today are all done."
+    elif p.overdue_at_start:
         days_n = p.catch_up_days
         s += (
             f" {p.overdue_at_start} were left over at the start of today ({p.overdue} still are); doing about "
@@ -252,10 +268,17 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
         )
     if p.has_plan:
         by = "you set it" if p.set_by == "bot" else "set by the code because you didn't"
-        s = (
-            f"TODAY'S PLAN ({by}): {p.new_cap} new cards, {p.round_size} cards a round now; "
-            f"target when it was made: {p.target} cards."
-        )
+        s = f"TODAY'S PLAN ({by}): {p.new_cap} new cards, "
+        if p.fixed_round:
+            s += f"{p.round_size} cards a round (the user asked for that size, so it stays); "
+        elif p.round_size > p.planned_round:
+            s += (
+                f"{p.round_size} cards a round now (planned {p.planned_round}; the code raised it because the "
+                "rest of today won't fit in the rounds left otherwise; tell the user if it comes up); "
+            )
+        else:
+            s += f"{p.round_size} cards a round; "
+        s += f"target when it was made: {p.target} cards."
         if p.reason:
             s += f" Your reasoning then: {p.reason}"
         if p.behind_by:

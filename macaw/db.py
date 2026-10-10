@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS day_plans (
     reason      TEXT,                                  -- the bot's reasoning, in its words
     set_by      TEXT NOT NULL,                         -- 'bot', or 'code' when the bot didn't set one
     created_at  TEXT NOT NULL,
+    fixed_round INTEGER NOT NULL DEFAULT 0,            -- 1: the user asked for this round size; never grow it
     PRIMARY KEY (user_id, day)
 );
 
@@ -213,6 +214,9 @@ class Store:
             self.x("ALTER TABLE review_log ADD COLUMN message_id INTEGER")
         if "missed" not in review_cols:
             self.x("ALTER TABLE review_log ADD COLUMN missed TEXT")
+        plan_cols = {r["name"] for r in self.q("PRAGMA table_info(day_plans)")}
+        if "fixed_round" not in plan_cols:
+            self.x("ALTER TABLE day_plans ADD COLUMN fixed_round INTEGER NOT NULL DEFAULT 0")
         state_cols = {r["name"] for r in self.q("PRAGMA table_info(conv_state)")}
         for col, decl in (
             ("ignored_since", "TEXT"),
@@ -326,13 +330,14 @@ class Store:
         return self.q1("SELECT * FROM day_plans WHERE user_id=? AND day=?", (user_id, day))
 
     def set_day_plan(self, user_id: int, day: str, new_cards: int, round_size: int, target: int,
-                     reason: str | None, set_by: str, at: datetime) -> None:
+                     reason: str | None, set_by: str, at: datetime, fixed_round: bool = False) -> None:
         self.x(
-            "INSERT INTO day_plans(user_id, day, new_cards, round_size, target, reason, set_by, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(user_id, day) DO UPDATE SET new_cards=excluded.new_cards, "
-            "round_size=excluded.round_size, target=excluded.target, reason=excluded.reason, "
-            "set_by=excluded.set_by, created_at=excluded.created_at",
-            (user_id, day, new_cards, round_size, target, reason, set_by, iso(at)),
+            "INSERT INTO day_plans(user_id, day, new_cards, round_size, target, reason, set_by, created_at, "
+            "fixed_round) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id, day) DO UPDATE SET "
+            "new_cards=excluded.new_cards, round_size=excluded.round_size, target=excluded.target, "
+            "reason=excluded.reason, set_by=excluded.set_by, created_at=excluded.created_at, "
+            "fixed_round=excluded.fixed_round",
+            (user_id, day, new_cards, round_size, target, reason, set_by, iso(at), int(fixed_round)),
         )
 
     def day_stats(self, user_id: int, since_day: str) -> dict[str, sqlite3.Row]:
