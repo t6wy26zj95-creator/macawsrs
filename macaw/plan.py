@@ -39,6 +39,9 @@ class Plan:
     new_reasons: list[str] = field(default_factory=list)  # why the suggestion is lower: backlog, hard, workload
     pace: float = 0.0  # answers a day lately
     again_rate: float | None = None
+    expected_again: float | None = None  # what the scheduler expected, given how long cards waited
+    studied_reviews: int = 0
+    long_overdue: int = 0
     # Today's plan as set (by the bot, or by the code when the bot didn't), if any.
     set_by: str | None = None
     reason: str | None = None
@@ -109,6 +112,9 @@ def build(store: Store, user: Mapping[str, Any], now: datetime) -> Plan:
         new_reasons=limits["reasons"],
         pace=b["pace"],
         again_rate=b["again_rate"],
+        expected_again=b["expected_again"],
+        studied_reviews=b["studied_reviews"],
+        long_overdue=b["long_overdue"],
         due_left_over=due["left_over"],
         due_scheduled=due["scheduled"],
         learning=due["learning"],
@@ -198,9 +204,21 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
     if p.again_rate is not None:
         normal = round((1 - float(user["desired_retention"])) * 100)
         s += (
-            f" Forgotten lately: {round(p.again_rate * 100)}% of reviews (not counting learning steps of "
-            f"new words); the scheduler aims for about {normal}%."
+            f" Forgotten lately: {round(p.again_rate * 100)}% of {p.studied_reviews} reviews (not counting "
+            f"learning steps)."
         )
+        if p.long_overdue:
+            s += (
+                f" {p.long_overdue} of those reviews were cards more than a month overdue, and from how long "
+                f"each card had waited the scheduler expected about {round(p.expected_again * 100)}% to be "
+                f"forgotten. Forgetting long-overdue cards is expected, not a failure; compare with that "
+                f"figure, not with the {normal}% the scheduler aims for on cards reviewed on time."
+            )
+        else:
+            s += (
+                f" From how long each card had waited, the scheduler expected about "
+                f"{round(p.expected_again * 100)}%; on cards reviewed on time it aims for about {normal}%."
+            )
     lines.append(s)
 
     why = ", ".join(WHY_FEWER_NEW[r] for r in p.new_reasons)
@@ -208,6 +226,11 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
         f"{p.suggested_new} new cards (the decks allow {p.new_limit}" + (f"; fewer because {why}" if why else "")
         + f"), {p.suggested_round} card{'s' if p.suggested_round != 1 else ''} a round"
     )
+    if not p.new_limit and not p.new_left:
+        lines.append(
+            "No new cards are waiting in the decks today, so there are no new words to hold back: "
+            "don't talk about stopping or slowing new words."
+        )
     if p.has_plan:
         by = "you set it" if p.set_by == "bot" else "set by the code because you didn't"
         s = (

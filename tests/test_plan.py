@@ -285,4 +285,23 @@ def test_misses_in_learning_steps_dont_count_as_forgetting(store, user):
     b = srs.backlog(store, user, NOW + timedelta(minutes=5))
     assert (b["again_rate"], b["studied_reviews"]) == (0.0, 1)
     line = "\n".join(plan.report(store, user, NOW + timedelta(minutes=5), plan.build(store, user, NOW)))
-    assert "Forgotten lately: 0% of reviews (not counting learning steps of new words); the scheduler aims for about 10%." in line
+    assert "Forgotten lately: 0% of 1 reviews (not counting learning steps)." in line
+    assert "more than a month overdue" not in line
+
+
+def test_long_overdue_cards_are_expected_to_be_forgotten(store, user):
+    """A deck not reviewed for a year: forgetting much more than the usual 10% is what the scheduler expects."""
+    make_deck(store, reviews_overdue=4)
+    for c in store.user_cards(UID):
+        store.set_card_schedule(c["id"], {
+            "state": srs.REVIEW, "step": None, "stability": 30.0, "difficulty": 5.0,
+            "due": iso(NOW - timedelta(days=400)), "last_review": iso(NOW - timedelta(days=430)),
+        })
+    for i, c in enumerate(store.user_cards(UID)):
+        srs.grade(store, user, c["id"], 1 if i == 0 else 3, "claude", None, NOW)
+    b = srs.backlog(store, user, NOW + timedelta(minutes=5))
+    assert b["long_overdue"] == 4 and b["again_rate"] == 0.25
+    assert b["expected_again"] > 0.3  # 430 days on a 30-day memory: far more than the usual 10%
+    line = "\n".join(plan.report(store, user, NOW + timedelta(minutes=5), plan.build(store, user, NOW)))
+    assert "4 of those reviews were cards more than a month overdue" in line
+    assert "No new cards are waiting in the decks today" in line
