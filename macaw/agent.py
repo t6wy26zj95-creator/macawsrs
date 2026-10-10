@@ -236,7 +236,7 @@ class Agent:
         waited = srs.describe_interval(now, asked) if asked else "a while"
         event = (
             f"The user hasn't answered the active card for {waited}. Write reminder number "
-            f"{st['reminders_streak'] + 1} today, tone: {level}. One or two sentences."
+            f"{st['reminders_streak'] + 1} for this card, tone: {level}. One or two sentences."
         )
         actions = await self._run(turn, event)
         if not any(isinstance(a, Text) for a in actions):
@@ -1200,8 +1200,9 @@ class Agent:
 
         async def set_today_plan(args):
             reason = strip_emoji(args.get("reason") or "") or None
+            size = args.get("cards_per_round") or plan.build(store, turn.user, turn.now).suggested_round
             p = plan.set_today(
-                store, turn.user, turn.now, args["new_cards"], args["cards_per_round"], reason, "bot",
+                store, turn.user, turn.now, args["new_cards"], size, reason, "bot",
                 fixed_round=bool(args.get("user_chose_round")),
                 max_cards=args.get("max_cards"),
                 plan_round=bool(args.get("plan_chooses_round")),
@@ -1459,7 +1460,7 @@ class Agent:
                     {"new_cards": INT, "cards_per_round": INT, "reason": STR,
                      "user_chose_round": {"type": "boolean"}, "plan_chooses_round": {"type": "boolean"},
                      "max_cards": INT},
-                    ["new_cards", "cards_per_round"],
+                    ["new_cards"],
                 ),
                 set_today_plan,
             ),

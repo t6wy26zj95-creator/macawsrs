@@ -248,8 +248,14 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
         s += (
             f" {p.overdue_at_start} were left over at the start of today ({p.overdue} still are); doing about "
             f"{p.quota} of them a day on top of each day's scheduled reviews clears them in about {days_n} "
-            f"day{'s' if days_n != 1 else ''}."
+            f"day{'s' if days_n != 1 else ''}, if that many get done each day."
         )
+        need = p.due_scheduled + p.learning + p.quota
+        if p.pace and p.pace < need:
+            s += (
+                f" That takes about {need} answers a day; at the recent pace (about {round(p.pace)}) the pile "
+                "won't shrink, so don't promise when it clears: say honestly what it takes."
+            )
     if p.pace:
         s += f" Lately about {round(p.pace)} answers a day."
     if p.again_rate is not None:
@@ -322,7 +328,10 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
         if p.reason:
             s += f" Your reasoning then: {p.reason}"
         if p.behind_by:
-            s += f" The user is {p.behind_by} cards behind an even pace towards it."
+            s += (
+                f" For the time of day, about {p.behind_by} cards behind it (for you; if it matters, tell "
+                "the user plainly, like \"a bit behind today\", without this number)."
+            )
     else:
         s = f"TODAY'S PLAN: not set yet. The code suggests {suggestion}."
     lines.append(s)
