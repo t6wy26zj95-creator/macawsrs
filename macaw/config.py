@@ -37,6 +37,10 @@ class Config:
     # NVIDIA's free API (build.nvidia.com): about 40 requests a minute, no daily cap.
     nvidia_api_key: str | None = None
     nvidia_models: tuple[str, ...] = NVIDIA_MODELS
+    # Groq key for turning voice messages into text (Whisper). Falls back to
+    # FREE_LLM_API_KEY when that one is a Groq key.
+    voice_api_key: str | None = None
+    voice_model: str = "whisper-large-v3"
 
     @property
     def free_label(self) -> str:
@@ -96,4 +100,16 @@ def load_config() -> Config:
         gemini_models=_gemini_models(os.environ.get("GEMINI_MODELS", "")),
         nvidia_api_key=os.environ.get("NVIDIA_API_KEY", "").strip() or None,
         nvidia_models=_parse_list(os.environ.get("NVIDIA_MODELS", "")) or NVIDIA_MODELS,
+        voice_api_key=_voice_key(),
+        voice_model=os.environ.get("VOICE_MODEL") or "whisper-large-v3",
     )
+
+
+def _voice_key() -> str | None:
+    key = os.environ.get("GROQ_API_KEY", "").strip()
+    if key:
+        return key
+    free_url = os.environ.get("FREE_LLM_BASE_URL") or "https://api.groq.com/openai/v1"
+    if "groq.com" in free_url:
+        return os.environ.get("FREE_LLM_API_KEY", "").strip() or None
+    return None
