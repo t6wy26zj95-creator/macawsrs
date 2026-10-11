@@ -339,3 +339,145 @@ async def test_broken_model_falls_through_and_tool_choice_retried(monkeypatch):
     calls.clear()
     assert await p.run("s", "p", tools) == "hi from ok"
     assert calls == [("ok", False)]
+
+
+def test_free_provider_order_with_nvidia():
+    from macaw.llm import make_free_provider
+
+    p = make_free_provider("gsk", "https://api.groq.com/openai/v1", "a", (), "gem", ("g1",), "nv", ("n1", "n2"))
+    assert [s.model for s in p.slots] == ["g1", "n1", "n2", "a"]
+    assert "nvidia" in p.slots[1].base_url
+
+
+def test_free_label_and_default_models(monkeypatch):
+    from macaw.config import GEMINI_MODELS, load_config
+
+    monkeypatch.setenv("BOT_TOKEN", "t")
+    monkeypatch.setenv("OWNER_IDS", "1")
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    monkeypatch.setenv("NVIDIA_API_KEY", "n")
+    monkeypatch.setenv("FREE_LLM_API_KEY", "q")
+    monkeypatch.setenv("GEMINI_MODELS", "")
+    cfg = load_config()
+    assert cfg.free_label == "Gemini, with NVIDIA and Groq as backup"
+    assert cfg.gemini_models == GEMINI_MODELS and any("lite" in m for m in GEMINI_MODELS)
+
+
+async def test_daily_limit_parks_the_model_until_reset(monkeypatch):
+    from macaw.llm import openai_compat as oc
+
+    calls = []
+
+    async def fake_post(self, session, slot, body):
+        calls.append(slot.model)
+        if slot.model == "flash":
+            raise oc.RateLimited(oc._daily_wait(slot), daily=True)
+        return {"choices": [{"message": {"content": "hi"}}]}
+
+    monkeypatch.setattr(OpenAICompatProvider, "_post", fake_post)
+    gem = oc.Slot("https://generativelanguage.googleapis.com/v1beta/openai/", "k", "flash")
+    p = OpenAICompatProvider(slots=[gem, oc.Slot("u", "k", "lite")])
+    assert await p.run("s", "p", []) == "hi"
+    assert await p.run("s", "p", []) == "hi"
+    assert calls == ["flash", "lite", "lite"]  # not asked again on the second turn
+    assert p.free_at[gem.key] - oc.time.monotonic() > 60
+
+
+def test_daily_429_detection_and_reset_time():
+    from datetime import datetime, timezone
+
+    from macaw.llm import openai_compat as oc
+
+    assert oc._is_daily('{"error": {"message": "Quota exceeded for metric: '
+                        'generate_requests_per_model_per_day, quotaId: GenerateRequestsPerDayPerProjectPerModel"}}')
+    assert oc._is_daily("Rate limit reached for model `openai/gpt-oss-120b` on tokens per day (TPD): Limit 200000")
+    assert not oc._is_daily("Rate limit reached on tokens per minute (TPM): Limit 8000")
+    gem = oc.Slot("https://generativelanguage.googleapis.com/v1beta/openai/", "k", "g")
+    # 07:00 UTC is midnight in Los Angeles (PDT), so the reset is almost a day away.
+    wait = oc._daily_wait(gem, datetime(2026, 10, 11, 7, 30, tzinfo=timezone.utc))
+    assert 23 * 3600 < wait < 24 * 3600
+    assert oc._daily_wait(oc.Slot("u", "k", "m")) == oc.DAILY_FALLBACK
+
+
+async def test_missing_model_is_skipped_for_a_day_and_reasoning_effort_retried(monkeypatch):
+    from macaw.llm import openai_compat as oc
+
+    calls = []
+
+    async def fake_post(self, session, slot, body):
+        calls.append((slot.model, "reasoning_effort" in body))
+        if slot.model == "openai/gpt-oss-gone":
+            raise oc.HTTPError(404, "not found")
+        if "reasoning_effort" in body:
+            raise oc.HTTPError(400, "unknown field reasoning_effort")
+        return {"choices": [{"message": {"content": "hi"}}]}
+
+    monkeypatch.setattr(OpenAICompatProvider, "_post", fake_post)
+    gone = oc.Slot("u", "k", "openai/gpt-oss-gone")
+    p = OpenAICompatProvider(slots=[gone, oc.Slot("u", "k", "openai/gpt-oss-ok")])
+    assert await p.run("s", "p", []) == "hi"
+    assert calls == [("openai/gpt-oss-gone", True), ("openai/gpt-oss-ok", True), ("openai/gpt-oss-ok", False)]
+    assert p.free_at[gone.key] - oc.time.monotonic() > 3600
+
+
+class Failing(FakeLLM):
+    def __init__(self, tool: str | None = None):
+        super().__init__()
+        self.tool = tool
+        self.ok = False
+
+    async def run(self, system, prompt, tools, must_use_tool=False):
+        self.prompts.append(prompt)
+        if self.ok:
+            return "from claude"
+        if self.tool:
+            await next(t for t in tools if t.name == self.tool).handler({})
+        raise LLMError("Claude AI usage limit reached")
+
+
+async def test_free_model_stands_in_while_claude_is_down():
+    from macaw.llm import ClaudeWithBackup
+
+    claude, free = Failing(), Named("free")
+    m = Models(frozenset({UID}), claude, free)
+    llm = m.for_user({"id": UID})
+    assert isinstance(llm, ClaudeWithBackup)
+    assert await llm.run("s", "p", [], must_use_tool=True) == "from free"
+    assert free.must_use_tool == [True]
+    assert m.pop_notice() and not m.pop_notice()  # told once
+    # While it's down, Claude isn't tried at all.
+    claude.ok = True
+    assert await llm.run("s", "p", []) == "from free" and len(claude.prompts) == 1
+    # After the pause Claude is tried again and takes back over.
+    llm.down_until = 0
+    assert await llm.run("s", "p", []) == "from claude"
+    assert llm.pause == 0 and not m.pop_notice()
+
+
+async def test_no_stand_in_once_claude_ran_a_tool():
+    async def handler(args):
+        return "graded"
+
+    m = Models(frozenset({UID}), Failing(tool="grade_card"), Named("free"))
+    with pytest.raises(LLMError):
+        await m.for_user({"id": UID}).run("s", "p", [ToolSpec("grade_card", "d", {}, handler)])
+    assert m.free.prompts == []
+
+
+def test_cli_error_text_is_an_error_not_a_reply():
+    from macaw.llm.claude import CLI_ERROR
+
+    assert CLI_ERROR.match("Claude AI usage limit reached|1760000000")
+    assert CLI_ERROR.match("Invalid API key · Please run /login")
+    assert not CLI_ERROR.match("What does 'subscription' mean?")
+
+
+def test_old_example_gemini_models_get_the_new_defaults(monkeypatch):
+    from macaw.config import GEMINI_MODELS, load_config
+
+    monkeypatch.setenv("BOT_TOKEN", "t")
+    monkeypatch.setenv("OWNER_IDS", "1")
+    monkeypatch.setenv("GEMINI_MODELS", "gemini-3.8-flash,gemini-2.5-flash")
+    assert load_config().gemini_models == GEMINI_MODELS
+    monkeypatch.setenv("GEMINI_MODELS", "gemini-x")
+    assert load_config().gemini_models == ("gemini-x",)

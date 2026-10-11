@@ -1,10 +1,12 @@
 """Models behind OpenAI-style chat completions APIs, with tool calling.
 
-Used for the free model: Gemini and/or Groq, tried in order. Free tiers have
-small per-minute limits (Groq: about 8K tokens a minute per model, and one bot
-call is around 4K), counted per model. So on a 429 we move to the next model,
-and when all of them are limited we wait for the soonest one to free up. A
-model that errors in another way is skipped for a minute.
+Used for the free model: Gemini, NVIDIA and/or Groq, tried in order. Free tiers
+have small limits (Gemini Flash: 20 requests a day; Groq: about 8K tokens a
+minute, and one bot call is around 6K), counted per model. So on a 429 we move
+to the next model, and when all of them are limited for a short while we wait
+for the soonest one to free up. A model whose daily limit is used up is skipped
+until the limit resets, so later turns don't keep asking it first. A model that
+errors in another way is skipped for a minute, or for a day if it doesn't exist.
 """
 
 from __future__ import annotations
@@ -14,6 +16,8 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import aiohttp
@@ -25,6 +29,9 @@ log = logging.getLogger(__name__)
 MAX_RATE_WAIT = 65  # seconds we're willing to wait for one rate limit to clear
 RATE_WAITS = 2  # how many such waits one turn may take
 BROKEN_PAUSE = 60  # seconds a model that errored is skipped
+MISSING_PAUSE = 24 * 3600  # a model the API doesn't have (404) or won't let this key use (403)
+AUTH_PAUSE = 3600  # the key itself was refused (401)
+DAILY_FALLBACK = 3600  # daily limit hit but no reset time known: look again in an hour
 
 
 @dataclass(frozen=True)
@@ -45,8 +52,9 @@ class Slot:
 
 
 class RateLimited(Exception):
-    def __init__(self, wait: float):
+    def __init__(self, wait: float, daily: bool = False):
         self.wait = wait
+        self.daily = daily
 
 
 class HTTPError(LLMError):
@@ -82,7 +90,11 @@ class OpenAICompatProvider:
         try:
             async with session.post(url, json=body, headers=headers) as r:
                 if r.status == 429:
-                    raise RateLimited(_retry_after(r.headers.get("retry-after")))
+                    text = (await r.text())[:2000]
+                    wait = _retry_after(r.headers.get("retry-after"))
+                    if _is_daily(text):
+                        raise RateLimited(max(wait, _daily_wait(slot)), daily=True)
+                    raise RateLimited(wait)
                 if r.status != 200:
                     text = (await r.text())[:300]
                     raise HTTPError(r.status, f"{slot.model}: HTTP {r.status}: {text}")
@@ -91,14 +103,15 @@ class OpenAICompatProvider:
             raise LLMError(f"{slot.model}: {e or type(e).__name__}") from e
 
     async def _try(self, session: aiohttp.ClientSession, slot: Slot, body: dict[str, Any]) -> dict[str, Any]:
+        full = _body_for(slot, body)
         try:
-            return await self._post(session, slot, _body_for(slot, body))
+            return await self._post(session, slot, full)
         except HTTPError as e:
-            if e.status == 400 and "tool_choice" in body:
-                # Not every API accepts tool_choice="required"; ask again without it.
-                log.info("%s rejected tool_choice, retrying without it", slot.model)
-                rest = {k: v for k, v in body.items() if k != "tool_choice"}
-                return await self._post(session, slot, _body_for(slot, rest))
+            optional = [k for k in ("tool_choice", "reasoning_effort") if k in full]
+            if e.status == 400 and optional:
+                # Not every API accepts tool_choice="required" or reasoning_effort; ask again without them.
+                log.info("%s rejected the request, retrying without %s", slot.model, ", ".join(optional))
+                return await self._post(session, slot, {k: v for k, v in full.items() if k not in optional})
             raise
 
     async def _complete(self, session: aiohttp.ClientSession, body: dict[str, Any]) -> dict[str, Any]:
@@ -114,10 +127,12 @@ class OpenAICompatProvider:
                     return await self._try(session, slot, body)
                 except RateLimited as e:
                     self.free_at[slot.key] = time.monotonic() + e.wait
-                    log.info("free model %s rate limited for %.0fs", slot.model, e.wait)
+                    what = "daily limit used up" if e.daily else "rate limited"
+                    log.info("free model %s %s, skipped for %.0fs", slot.model, what, e.wait)
                 except LLMError as e:
-                    self.free_at[slot.key] = time.monotonic() + BROKEN_PAUSE
-                    log.warning("free model failed, trying the next one: %s", e)
+                    pause = _pause_for(e)
+                    self.free_at[slot.key] = time.monotonic() + pause
+                    log.warning("free model failed, skipped for %.0fs: %s", pause, e)
                     error = e
             wait = min(self.free_at.get(s.key, 0) for s in self.slots) - time.monotonic()
             if waits >= RATE_WAITS or wait > MAX_RATE_WAIT:
@@ -201,6 +216,32 @@ def _strip_extra(schema: Any) -> Any:
     if isinstance(schema, list):
         return [_strip_extra(v) for v in schema]
     return schema
+
+
+def _pause_for(e: LLMError) -> float:
+    status = getattr(e, "status", None)
+    if status in (403, 404):
+        return MISSING_PAUSE
+    if status == 401:
+        return AUTH_PAUSE
+    return BROKEN_PAUSE
+
+
+def _is_daily(body: str) -> bool:
+    """Whether a 429 is about a daily allowance rather than a per-minute one.
+    Gemini names the quota (GenerateRequestsPerDayPerProjectPerModel), Groq
+    says "requests per day (RPD)" or "tokens per day (TPD)"."""
+    low = body.lower()
+    return "perday" in low or "per day" in low or "(rpd)" in low or "(tpd)" in low
+
+
+def _daily_wait(slot: Slot, now: datetime | None = None) -> float:
+    if slot.is_gemini:
+        # Gemini's free allowance resets at midnight Pacific time.
+        pacific = (now or datetime.now(ZoneInfo("UTC"))).astimezone(ZoneInfo("America/Los_Angeles"))
+        reset = (pacific + timedelta(days=1)).replace(hour=0, minute=1, second=0, microsecond=0)
+        return (reset - pacific).total_seconds()
+    return DAILY_FALLBACK
 
 
 def _retry_after(raw: str | None) -> float:

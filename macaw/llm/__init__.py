@@ -4,8 +4,12 @@ their OpenAI-style APIs) for guests and for owners who switch to it."""
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Protocol
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -41,6 +45,56 @@ CLAUDE = "claude"
 FREE = "free"
 
 
+class ClaudeWithBackup:
+    """Claude, with the free model taking over while Claude doesn't answer (the
+    Pro usage limit was hit, or the subscription ended). Claude is tried again
+    after a pause that doubles each time it is still down, up to a few hours.
+
+    The free model only takes over when Claude failed before running any tool:
+    once a card has been graded, running the turn again would grade it twice."""
+
+    FIRST_PAUSE = 30 * 60
+    MAX_PAUSE = 6 * 3600
+
+    def __init__(self, claude: LLMProvider, free: LLMProvider):
+        self.claude = claude
+        self.free = free
+        self.down_until = 0.0
+        self.pause = 0.0
+        # Set when the free model took over; the bot tells the user once, then clears it.
+        self.notice = False
+
+    @property
+    def is_down(self) -> bool:
+        return time.monotonic() < self.down_until
+
+    async def run(self, system: str, prompt: str, tools: list[ToolSpec], must_use_tool: bool = False) -> str:
+        if self.is_down:
+            return await self.free.run(system, prompt, tools, must_use_tool)
+        used = []
+
+        def watch(spec: ToolSpec) -> ToolSpec:
+            async def handler(args: dict[str, Any]) -> str:
+                used.append(spec.name)
+                return await spec.handler(args)
+
+            return ToolSpec(spec.name, spec.description, spec.schema, handler)
+
+        try:
+            reply = await self.claude.run(system, prompt, [watch(t) for t in tools], must_use_tool)
+        except LLMError as e:
+            if used:
+                raise
+            first = self.pause == 0
+            self.pause = min(self.pause * 2, self.MAX_PAUSE) if self.pause else self.FIRST_PAUSE
+            self.down_until = time.monotonic() + self.pause
+            self.notice = self.notice or first
+            log.warning("Claude unavailable, using the free model for %.0f min: %s", self.pause / 60, e)
+            return await self.free.run(system, prompt, tools, must_use_tool)
+        self.pause = 0.0
+        return reply
+
+
 class Models:
     """Picks the model for each user. Only owners may ever use Claude (it runs on
     the owner's own Pro subscription); guests always get the free model."""
@@ -49,6 +103,14 @@ class Models:
         self.owner_ids = owner_ids
         self.claude = claude
         self.free = free
+        self.backup = ClaudeWithBackup(claude, free) if free is not None else None
+
+    def pop_notice(self) -> bool:
+        """Whether the free model just took over from Claude (reported once)."""
+        if self.backup and self.backup.notice:
+            self.backup.notice = False
+            return True
+        return False
 
     def name_for(self, user: dict[str, Any]) -> str:
         if user["id"] in self.owner_ids and user.get("llm") != FREE:
@@ -57,13 +119,14 @@ class Models:
 
     def for_user(self, user: dict[str, Any]) -> LLMProvider:
         if self.name_for(user) == CLAUDE:
-            return self.claude
+            return self.backup or self.claude
         if self.free is None:
-            raise LLMError("the free model is not set up (GEMINI_API_KEY and FREE_LLM_API_KEY are empty)")
+            raise LLMError("the free model is not set up (no GEMINI_API_KEY, NVIDIA_API_KEY or FREE_LLM_API_KEY)")
         return self.free
 
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 
 def make_free_provider(
@@ -73,14 +136,19 @@ def make_free_provider(
     fallbacks: tuple[str, ...] = (),
     gemini_key: str | None = None,
     gemini_models: tuple[str, ...] = (),
+    nvidia_key: str | None = None,
+    nvidia_models: tuple[str, ...] = (),
 ) -> LLMProvider | None:
-    """The free model: Gemini first if it has a key, then Groq (or another
-    OpenAI-style API). Each next one takes over when the one before is busy."""
+    """The free model: Gemini first if it has a key, then NVIDIA, then Groq (or
+    another OpenAI-style API). Each next one takes over when the one before is
+    busy or out of its daily allowance."""
     from .openai_compat import OpenAICompatProvider, Slot
 
     slots: list[Slot] = []
     if gemini_key:
         slots += [Slot(GEMINI_BASE_URL, gemini_key, m) for m in gemini_models]
+    if nvidia_key:
+        slots += [Slot(NVIDIA_BASE_URL, nvidia_key, m) for m in nvidia_models]
     if api_key:
         slots += [Slot(base_url, api_key, m) for m in dict.fromkeys([model, *fallbacks])]
     return OpenAICompatProvider(slots=slots) if slots else None
