@@ -7,6 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+# The best model first; each next one has a bigger free allowance. Flash: 20
+# requests a day, each Flash-Lite: about 500 a day, all counted separately.
+GEMINI_MODELS = ("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
+# What .env.example used to suggest; gemini-2.5-flash no longer works for new keys.
+OLD_GEMINI_EXAMPLE = ("gemini-3.8-flash", "gemini-2.5-flash")
+NVIDIA_MODELS = ("openai/gpt-oss-120b", "nvidia/nemotron-3-super-120b-a12b", "openai/gpt-oss-20b")
+
+
 @dataclass(frozen=True)
 class Config:
     bot_token: str
@@ -25,13 +33,20 @@ class Config:
     free_fallback_models: tuple[str, ...] = ("openai/gpt-oss-20b",)
     # Gemini's free tier, tried before the models above when it has a key.
     gemini_api_key: str | None = None
-    gemini_models: tuple[str, ...] = ("gemini-3.8-flash", "gemini-2.5-flash")
+    gemini_models: tuple[str, ...] = GEMINI_MODELS
+    # NVIDIA's free API (build.nvidia.com): about 40 requests a minute, no daily cap.
+    nvidia_api_key: str | None = None
+    nvidia_models: tuple[str, ...] = NVIDIA_MODELS
 
     @property
     def free_label(self) -> str:
-        if self.gemini_api_key and self.free_api_key:
-            return "Gemini, with Groq as backup"
-        return "Gemini" if self.gemini_api_key else "Groq" if self.free_api_key else "not set up"
+        keys = (("Gemini", self.gemini_api_key), ("NVIDIA", self.nvidia_api_key), ("Groq", self.free_api_key))
+        names = [name for name, key in keys if key]
+        if not names:
+            return "not set up"
+        if len(names) == 1:
+            return names[0]
+        return f"{names[0]}, with {' and '.join(names[1:])} as backup"
 
     @property
     def allowed_ids(self) -> frozenset[int]:
@@ -49,6 +64,11 @@ def _parse_ids(raw: str) -> frozenset[int]:
 
 def _parse_list(raw: str) -> tuple[str, ...]:
     return tuple(m.strip() for m in raw.split(",") if m.strip())
+
+
+def _gemini_models(raw: str) -> tuple[str, ...]:
+    models = _parse_list(raw)
+    return GEMINI_MODELS if not models or models == OLD_GEMINI_EXAMPLE else models
 
 
 def load_config() -> Config:
@@ -73,5 +93,7 @@ def load_config() -> Config:
         free_model=os.environ.get("FREE_LLM_MODEL") or "openai/gpt-oss-120b",
         free_fallback_models=_parse_list(os.environ.get("FREE_LLM_FALLBACK_MODELS", "openai/gpt-oss-20b")),
         gemini_api_key=os.environ.get("GEMINI_API_KEY", "").strip() or None,
-        gemini_models=_parse_list(os.environ.get("GEMINI_MODELS", "gemini-3.8-flash,gemini-2.5-flash")),
+        gemini_models=_gemini_models(os.environ.get("GEMINI_MODELS", "")),
+        nvidia_api_key=os.environ.get("NVIDIA_API_KEY", "").strip() or None,
+        nvidia_models=_parse_list(os.environ.get("NVIDIA_MODELS", "")) or NVIDIA_MODELS,
     )

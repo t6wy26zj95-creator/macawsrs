@@ -35,9 +35,11 @@ async def main() -> None:
         config.free_fallback_models,
         config.gemini_api_key,
         config.gemini_models,
+        config.nvidia_api_key,
+        config.nvidia_models,
     )
     if config.guest_ids and free is None:
-        logging.warning("GUEST_IDS is set but GEMINI_API_KEY and FREE_LLM_API_KEY are empty: guests can't chat yet")
+        logging.warning("GUEST_IDS is set but no free model key (GEMINI_API_KEY, NVIDIA_API_KEY, FREE_LLM_API_KEY) is set: guests can't chat yet")
     agent = Agent(store, claude, Models(config.owner_ids, claude, free))
     bot = Bot(config.bot_token)
     app = App(config, store, agent, bot)

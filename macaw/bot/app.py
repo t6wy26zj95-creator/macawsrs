@@ -115,12 +115,21 @@ class App:
                 user_id, llm_backoff_until=iso(_now() + timedelta(minutes=LLM_BACKOFF_MIN))
             )
             if notify:
-                if self._model_name(user_id) == CLAUDE:
-                    why = "I can't reach Claude right now (maybe the Pro usage limit was hit)."
-                else:
+                models = self.agent.models
+                if self._model_name(user_id) != CLAUDE:
                     why = "I can't reach the free AI model right now (maybe its daily limit was hit)."
+                elif models and models.free is not None:
+                    why = "I can't reach Claude or the free AI model right now."
+                else:
+                    why = "I can't reach Claude right now (maybe the Pro usage limit was hit)."
                 await self.bot.send_message(chat_id, why + " Try again in a little while; your cards are safe.")
             return
+        if self.agent.models and self.agent.models.pop_notice():
+            await self.bot.send_message(
+                chat_id,
+                "(Claude isn't answering right now, so the free model is standing in. "
+                "I'll go back to Claude by myself once it works again.)",
+            )
         await self.send_actions(chat_id, actions)
 
     # ================= handlers =================
@@ -139,6 +148,9 @@ class App:
         current = self._model_name(user_id)
         label = {CLAUDE: "Claude", FREE: f"the free model ({self.config.free_label})"}
         text = f"You're using {label[current]}."
+        backup = self.agent.models.backup if self.agent.models else None
+        if current == CLAUDE and backup and backup.is_down:
+            text += " Claude isn't answering at the moment, so the free model is standing in until it does."
         if user_id not in self.config.owner_ids:
             return text, None
         text += " Your cards and our chat stay the same when you switch."
@@ -338,7 +350,7 @@ class App:
                 return
             choice = c.data.split(":", 1)[1]
             if choice == FREE and self.agent.models and self.agent.models.free is None:
-                await c.answer("The free model isn't set up yet (no Gemini or Groq key).", show_alert=True)
+                await c.answer("The free model isn't set up yet (no Gemini, NVIDIA or Groq key).", show_alert=True)
                 return
             if choice in (CLAUDE, FREE):
                 self.store.update_user(uid, llm=choice)

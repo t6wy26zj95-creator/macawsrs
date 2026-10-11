@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 
 from claude_agent_sdk import (
@@ -25,6 +26,14 @@ from . import LLMError, ToolSpec
 log = logging.getLogger(__name__)
 
 SERVER = "srs"
+
+# Claude Code sometimes reports a lost login or a used-up plan as an ordinary
+# reply instead of an error. Those must not reach the user as the bot's words.
+CLI_ERROR = re.compile(
+    r"^(claude ai usage limit reached|you've hit your (usage )?limit|you've reached your usage limit|"
+    r"invalid api key|please run /login|oauth token (has )?expired|credit balance is too low|api error: \d)",
+    re.IGNORECASE,
+)
 
 
 class ClaudeCodeProvider:
@@ -103,5 +112,9 @@ class ClaudeCodeProvider:
             raise LLMError(f"{result.subtype}: {result.errors or result.api_error_status}")
         # The final reply is the text after the last tool round.
         if result is not None and result.result:
-            return result.result.strip()
-        return texts[-1].strip() if texts else ""
+            reply = result.result.strip()
+        else:
+            reply = texts[-1].strip() if texts else ""
+        if len(reply) < 200 and CLI_ERROR.match(reply):
+            raise LLMError(reply)
+        return reply
