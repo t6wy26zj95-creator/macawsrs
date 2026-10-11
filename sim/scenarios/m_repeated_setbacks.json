@@ -1,0 +1,14 @@
+{"setup": "imported_behind", "seed": 23, "persona": "Nick keeps falling off and is getting down on himself.", "steps": [
+ {"wait": "2026-10-10 08:30"},
+ {"answer": "know"},
+ {"study": {"until": "2026-10-10 11:00", "know": 0.8, "delay": [2, 10]}},
+ {"comment": "rest of Saturday and all of Sunday ignored"},
+ {"wait": "2026-10-12 08:50"},
+ {"comment": "Monday"},
+ {"user": "come back after ignoring the bot since saturday morning. say you keep failing at this, it's always the same, maybe you're just not disciplined enough for this"},
+ {"wait_min": 3},
+ {"user": "respond to what the bot said, honestly"},
+ {"wait_min": 3},
+ {"answer": "know"},
+ {"study": {"until": "2026-10-12 13:00", "know": 0.8, "delay": [2, 15]}}
+]}

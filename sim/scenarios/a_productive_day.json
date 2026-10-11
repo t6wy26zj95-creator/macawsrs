@@ -1,0 +1,15 @@
+{"setup": "imported_behind", "seed": 11, "persona": "Today Nick is in a great mood and has time; he does every round promptly.", "steps": [
+ {"comment": "Saturday: a productive day"},
+ {"wait": "2026-10-10 08:20"},
+ {"user": "say good morning, you slept well and you're ready, answer the question if there is one"},
+ {"study": {"until": "2026-10-10 14:00", "know": 0.85, "delay": [1, 8]}},
+ {"user": "tell the bot you've had a really productive day so far, did a lot of work and the cards feel easier than yesterday. ask how you're doing overall"},
+ {"study": {"until": "2026-10-10 21:30", "know": 0.85, "delay": [1, 10]}},
+ {"user": "ask if you hit today's goal"},
+ {"comment": "Sunday morning"},
+ {"wait": "2026-10-11 09:00"},
+ {"user": "reply to whatever the bot said; you're happy about yesterday"},
+ {"wait_min": 10},
+ {"answer": "know"},
+ {"user": "ask honestly: at this rate when will the backlog be gone?"}
+]}

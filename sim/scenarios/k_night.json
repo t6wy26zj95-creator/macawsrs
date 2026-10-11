@@ -1,0 +1,17 @@
+{"setup": "imported_behind", "seed": 21, "persona": "Nick couldn't study during the day and is doing cards late at night.", "steps": [
+ {"wait": "2026-10-10 08:05"},
+ {"wait": "2026-10-10 23:40"},
+ {"user": "say hey, couldn't do anything today, was out all day. want to do some now"},
+ {"wait_min": 2},
+ {"answer": "know"},
+ {"wait_min": 2},
+ {"answer": "know"},
+ {"wait_min": 2},
+ {"answer": "wrong"},
+ {"wait": "2026-10-11 00:20"},
+ {"user": "say you want to keep going, give me more"},
+ {"wait_min": 2},
+ {"answer": "know"},
+ {"wait_min": 2},
+ {"user": "ask: what does tomorrow look like now"}
+]}

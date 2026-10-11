@@ -1,0 +1,18 @@
+{"setup": "imported_behind", "seed": 18, "persona": "Nick is in a short, low-energy mood today.", "steps": [
+ {"wait": "2026-10-10 08:50"},
+ {"say": "meh"},
+ {"wait_min": 2},
+ {"say": "idk. tired"},
+ {"wait_min": 3},
+ {"user": "reply briefly to whatever the bot said"},
+ {"wait": "2026-10-10 11:00"},
+ {"say": "ok fine"},
+ {"wait_min": 2},
+ {"answer": "know"},
+ {"wait_min": 2},
+ {"say": "later"},
+ {"wait": "2026-10-10 15:00"},
+ {"user": "answer the card if one is open, otherwise say hey"},
+ {"wait_min": 2},
+ {"say": "is it bad that im only doing a few today"}
+]}

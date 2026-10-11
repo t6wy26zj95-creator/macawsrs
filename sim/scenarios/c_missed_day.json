@@ -1,0 +1,12 @@
+{"setup": "imported_behind", "seed": 13, "persona": "Nick had a family emergency on Saturday and didn't touch his phone all day.", "steps": [
+ {"comment": "Saturday: no answers at all"},
+ {"wait": "2026-10-11 07:55"},
+ {"comment": "Sunday"},
+ {"wait": "2026-10-11 11:40"},
+ {"user": "come back after a day away. say sorry, yesterday was a family thing and you didn't look at your phone at all. you feel bad about the cards piling up"},
+ {"wait_min": 3},
+ {"user": "respond to the bot. ask honestly how bad the damage is"},
+ {"wait_min": 3},
+ {"answer": "know"},
+ {"study": {"until": "2026-10-11 15:00", "know": 0.75, "delay": [2, 12]}}
+]}

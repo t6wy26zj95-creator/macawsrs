@@ -240,21 +240,40 @@ def report(store: Store, user: Mapping[str, Any], now: datetime, p: Plan) -> lis
             "ending; when the new one starts, today's target and plan are worked out again from those numbers. "
             "Use that when talking about tomorrow or the morning, and don't promise the new day's numbers yet."
         )
-    s = f"Overall: {STATUS_WORDS[p.status]}."
+    if p.has_plan and p.target and not srs.is_quiet(user, now):
+        done = max(0, p.target - p.goal_left)
+        behind = p.behind_by >= max(5, p.round_size)
+        slipped = parse(store.state(user["id"])["slipped_at"])
+        if behind and (slipped is None or (p.made_at and slipped <= p.made_at)):
+            # Every card asked was answered: the rounds so far just couldn't hold more.
+            pace_s = (
+                "behind an even pace, but only because the rounds so far couldn't hold more: they answered "
+                "every card they were asked, so it's not on them"
+            )
+        else:
+            pace_s = "a bit behind for the time of day" if behind else "on pace for the time of day"
+        lines.append(
+            f"Today so far: {done} of today's target of {p.target} done, {pace_s}. That is how today is going; "
+            "the backlog below is a separate, slower thing."
+        )
+    s = f"Backlog: {STATUS_WORDS[p.status]}."
     if p.overdue_at_start and not p.overdue:
         s += f" The {p.overdue_at_start} left over at the start of today are all done."
     elif p.overdue_at_start:
         days_n = -(-p.overdue // max(1, p.quota))
-        s += (
-            f" {p.overdue_at_start} were left over at the start of today ({p.overdue} still are); doing about "
-            f"{p.quota} of them a day on top of each day's scheduled reviews clears them in about {days_n} "
-            f"day{'s' if days_n != 1 else ''}, if that many get done each day."
-        )
         need = p.due_scheduled + p.learning + p.quota
+        s += f" {p.overdue_at_start} were left over at the start of today ({p.overdue} still are)."
         if p.pace and p.pace < need:
+            # One honest statement, not a "clears in 2 days" next to a "won't shrink".
             s += (
-                f" That takes about {need} answers a day; at the recent pace (about {round(p.pace)}) the pile "
-                "won't shrink, so don't promise when it clears: say honestly what it takes."
+                f" Clearing them takes about {need} answers a day (each day's scheduled reviews plus about "
+                f"{p.quota} of the old ones); at the recent pace (about {round(p.pace)}) the pile won't shrink. "
+                "So don't name a day it clears; if it comes up, say what it takes."
+            )
+        else:
+            s += (
+                f" Doing about {p.quota} of them a day on top of each day's scheduled reviews clears them in "
+                f"about {days_n} day{'s' if days_n != 1 else ''}."
             )
     if p.pace:
         s += f" Lately about {round(p.pace)} answers a day."
@@ -345,8 +364,8 @@ def _made_of(p: Plan) -> str:
         return (
             f" = {today} for today + {p.overdue_today} of the {p.due_left_over} left over (today's share of "
             "the old pile; the rest comes on later days). Any due card done counts toward it. When you tell "
-            "the user, lead with the one number still to do and say what it's made of in those words; don't "
-            "list the other totals next to it."
+            "the user, give the one number still to do; say what it's made of only at the check-in or when "
+            "they ask, and then copy these numbers, don't add or subtract yourself."
         )
     return (
         f" (today's target is all of today's scheduled cards plus about {p.quota} of the left-over "
@@ -369,9 +388,14 @@ def fit_note(user: Mapping[str, Any], now: datetime, p: Plan) -> str:
     )
 
 
-def nudge_due(p: Plan, now: datetime, last_nudge: datetime | None) -> bool:
-    """Time to tell the user they're behind today's target."""
+def nudge_due(p: Plan, now: datetime, last_nudge: datetime | None, slipped_at: datetime | None = None) -> bool:
+    """Time to tell the user they're behind today's target: only when they let a card
+    wait since the plan was made or since the last nudge or talk. Someone who answers
+    every round isn't told they're behind because the rounds can't hold the day."""
     if not p.has_plan or p.behind_by < max(5, p.round_size):
+        return False
+    since = max(t for t in (last_nudge, p.made_at) if t is not None) if (last_nudge or p.made_at) else None
+    if slipped_at is None or (since is not None and slipped_at <= since):
         return False
     return last_nudge is None or now - last_nudge >= NUDGE_EVERY
 

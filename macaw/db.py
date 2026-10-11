@@ -167,6 +167,15 @@ CREATE TABLE IF NOT EXISTS anki_notetypes (
     PRIMARY KEY (user_id, id)
 );
 
+-- What the bot keeps in mind about the user beyond the recent chat: their routine, a busy
+-- week coming, being ill, an agreement ("on busy days, 10 cards"). Written by the bot.
+CREATE TABLE IF NOT EXISTS user_notes (
+    id          INTEGER PRIMARY KEY,
+    user_id     INTEGER NOT NULL,
+    text        TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS invites (
     code        TEXT PRIMARY KEY,
     created_by  INTEGER NOT NULL,
@@ -234,6 +243,8 @@ class Store:
             ("nudge_at", "TEXT"),
             ("round_said", "TEXT"),
             ("round_target", "INTEGER"),
+            ("slipped_at", "TEXT"),  # last time a card had to wait for a reminder
+            ("round_started_at", "TEXT"),
         ):
             if col not in state_cols:
                 self.x(f"ALTER TABLE conv_state ADD COLUMN {col} {decl}")
@@ -332,6 +343,19 @@ class Store:
         return row  # type: ignore[return-value]
 
     # ---------- study plans ----------
+
+    def memory_notes(self, user_id: int) -> list[sqlite3.Row]:
+        return self.q("SELECT * FROM user_notes WHERE user_id=? ORDER BY id", (user_id,))
+
+    def add_memory_note(self, user_id: int, text: str, at: datetime) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO user_notes(user_id, text, created_at) VALUES (?,?,?)", (user_id, text, iso(at))
+        )
+        return int(cur.lastrowid)
+
+    def delete_memory_note(self, user_id: int, note_id: int) -> bool:
+        cur = self.conn.execute("DELETE FROM user_notes WHERE user_id=? AND id=?", (user_id, note_id))
+        return cur.rowcount > 0
 
     def day_plan(self, user_id: int, day: str) -> sqlite3.Row | None:
         return self.q1("SELECT * FROM day_plans WHERE user_id=? AND day=?", (user_id, day))
