@@ -1,0 +1,11 @@
+{"setup": "imported_behind", "seed": 17, "persona": "Nick tends to do well for a couple of days, then drop off. He's a bit frustrated with himself.", "steps": [
+ {"wait": "2026-10-10 08:40"},
+ {"answer": "know"},
+ {"wait_min": 2},
+ {"user": "say: can i ask you something. i always do great for 2 or 3 days and then just stop for a few days. it's been like that with anki for years. why do i keep doing that and how do i fix it"},
+ {"wait_min": 3},
+ {"user": "react to the advice honestly. if it was generic, say so. if it asked you a question, answer it: usually it's when work gets busy or when the pile looks too big"},
+ {"wait_min": 3},
+ {"user": "respond naturally, maybe agree to try what it suggested"},
+ {"study": {"until": "2026-10-10 12:00", "know": 0.8, "delay": [2, 10]}}
+]}

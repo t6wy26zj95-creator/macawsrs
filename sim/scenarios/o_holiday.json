@@ -1,0 +1,14 @@
+{"setup": "imported_behind", "seed": 25, "persona": "Nick is going on holiday.", "steps": [
+ {"wait": "2026-10-10 08:30"},
+ {"answer": "know"},
+ {"wait_min": 3},
+ {"user": "say: heads up, i'm going on holiday tomorrow for a week, no cards at all please, i'll be back next sunday"},
+ {"wait_min": 3},
+ {"user": "ask: will i forget everything in a week?"},
+ {"wait": "2026-10-18 10:00"},
+ {"user": "say you're back from holiday, it was great. ask how bad it is now"},
+ {"wait_min": 3},
+ {"user": "respond naturally; if the bot offered a plan, ask for a gentle restart"},
+ {"wait_min": 3},
+ {"answer": "half"}
+]}

@@ -1,0 +1,13 @@
+{"setup": "imported_behind", "seed": 16, "persona": "Nick woke up with a fever and feels awful.", "steps": [
+ {"wait": "2026-10-10 09:10"},
+ {"user": "reply to the morning message: you're sick, fever, feel like garbage, can't really think. don't answer the card"},
+ {"wait_min": 3},
+ {"user": "if the bot is still pushing cards, say you really can't today; otherwise just say thanks"},
+ {"wait": "2026-10-10 18:00"},
+ {"wait": "2026-10-11 09:30"},
+ {"user": "reply to the bot: feeling a little better today but still weak"},
+ {"wait_min": 3},
+ {"answer": "know"},
+ {"wait_min": 3},
+ {"answer": "dunno"}
+]}

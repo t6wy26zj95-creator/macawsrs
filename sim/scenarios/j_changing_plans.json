@@ -1,0 +1,11 @@
+{"setup": "imported_behind", "seed": 20, "persona": "Nick's day changes a lot.", "steps": [
+ {"wait": "2026-10-10 08:30"},
+ {"user": "reply to the morning message: today's packed, going to a wedding, can we do a light day, like 15 cards max"},
+ {"wait_min": 3},
+ {"answer": "know"},
+ {"study": {"until": "2026-10-10 12:00", "know": 0.8, "delay": [2, 10]}},
+ {"user": "plans changed, the wedding got postponed, so you're free this afternoon and actually want to do a proper day after all"},
+ {"wait_min": 3},
+ {"study": {"until": "2026-10-10 18:00", "know": 0.8, "delay": [2, 10]}},
+ {"user": "ask how much you've done today and how much is left"}
+]}

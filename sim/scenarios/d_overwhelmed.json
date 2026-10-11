@@ -1,0 +1,12 @@
+{"setup": "imported_behind", "seed": 14, "persona": "Nick feels overwhelmed by the overdue pile and a bit discouraged, but not angry.", "steps": [
+ {"wait": "2026-10-10 08:25"},
+ {"user": "react to the morning message: honestly that number is a lot, you feel overwhelmed and like you'll never catch up. don't answer the card"},
+ {"wait_min": 3},
+ {"user": "respond to the bot. say something like: maybe i should just reset the deck or delete half of it?"},
+ {"wait_min": 3},
+ {"user": "respond to what the bot suggested. if it offered a lighter plan, accept something lighter; ask how many would be realistic"},
+ {"wait_min": 3},
+ {"answer": "know"},
+ {"study": {"until": "2026-10-10 13:00", "know": 0.8, "delay": [2, 12]}},
+ {"user": "say that actually wasn't so bad, feeling a bit better about it"}
+]}

@@ -1,0 +1,16 @@
+{"setup": "imported_behind", "seed": 24, "persona": "Nick has a fixed routine.", "steps": [
+ {"wait": "2026-10-10 08:30"},
+ {"user": "reply to the morning message: tell the bot your routine on weekdays: you can only do cards on the train from 7:30 to 8:15 and in the evening after 9. during work (9 to 6) you can't answer at all. ask if it can work with that"},
+ {"wait_min": 3},
+ {"user": "respond to what it said; if it promised something, ask exactly how it will work"},
+ {"wait_min": 3},
+ {"answer": "know"},
+ {"wait": "2026-10-12 07:35"},
+ {"comment": "Monday morning on the train"},
+ {"user": "say morning, on the train now, let's go"},
+ {"wait_min": 2},
+ {"answer": "know"},
+ {"wait_min": 2},
+ {"answer": "half"},
+ {"wait": "2026-10-12 13:00"}
+]}

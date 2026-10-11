@@ -1,0 +1,16 @@
+{"setup": "imported_behind", "seed": 12, "persona": "Today Nick is swamped at work and mostly can't answer.", "steps": [
+ {"comment": "Saturday: starts fine, then falls behind"},
+ {"wait": "2026-10-10 08:30"},
+ {"answer": "know"},
+ {"study": {"until": "2026-10-10 10:30", "know": 0.8, "delay": [2, 10]}},
+ {"study": {"until": "2026-10-10 19:30", "know": 0.8, "delay": [30, 90], "skip": 0.6}},
+ {"user": "apologize a bit: you fell way behind today, had back to back stuff all afternoon and couldn't answer. ask what now"},
+ {"wait_min": 5},
+ {"user": "react naturally to the bot's reply. say you can do maybe 10 more tonight but not more"},
+ {"study": {"until": "2026-10-10 22:30", "know": 0.75, "delay": [1, 6]}},
+ {"user": "say that's it for tonight, you're tired"},
+ {"wait": "2026-10-11 09:30"},
+ {"user": "reply to whatever the bot said this morning"},
+ {"wait_min": 4},
+ {"answer": "half"}
+]}

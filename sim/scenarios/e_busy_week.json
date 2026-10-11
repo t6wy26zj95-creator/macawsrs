@@ -1,0 +1,19 @@
+{"setup": "imported_behind", "seed": 15, "persona": "Nick has a crunch week at work starting Monday: deadlines until Friday, maybe 10 minutes a day for cards.", "steps": [
+ {"wait": "2026-10-10 08:30"},
+ {"answer": "know"},
+ {"wait_min": 3},
+ {"user": "tell the bot: heads up, from monday until friday i have a brutal week at work with a deadline friday, i'll have maybe 10 min a day for cards. today and tomorrow are normal though"},
+ {"study": {"until": "2026-10-10 12:00", "know": 0.8, "delay": [2, 10]}},
+ {"study": {"until": "2026-10-11 07:50", "know": 0.8, "delay": [3, 20], "skip": 0.3}},
+ {"comment": "Sunday: normal"},
+ {"study": {"until": "2026-10-11 20:00", "know": 0.8, "delay": [3, 20], "skip": 0.3}},
+ {"comment": "Monday: crunch begins, Nick says nothing about it"},
+ {"wait": "2026-10-12 08:45"},
+ {"answer": "know"},
+ {"study": {"until": "2026-10-12 21:00", "know": 0.8, "delay": [20, 120], "skip": 0.7}},
+ {"comment": "Tuesday"},
+ {"wait": "2026-10-13 09:10"},
+ {"user": "reply to the bot's morning message in one line, sounding stressed and busy"},
+ {"wait_min": 2},
+ {"answer": "half"}
+]}

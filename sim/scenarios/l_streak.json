@@ -1,0 +1,13 @@
+{"setup": "on_track", "seed": 22, "persona": "Nick is on a good run: he's been doing every card for days and enjoys it.", "steps": [
+ {"wait": "2026-10-10 08:20"},
+ {"answer": "know"},
+ {"study": {"until": "2026-10-10 20:00", "know": 0.92, "delay": [1, 8]}},
+ {"user": "ask whether you're actually getting better or just going through the motions"},
+ {"wait": "2026-10-11 08:30"},
+ {"study": {"until": "2026-10-11 19:00", "know": 0.92, "delay": [1, 8]}},
+ {"user": "say this is going really well, these feel easy now. ask if you should add more new words"},
+ {"wait_min": 3},
+ {"user": "react to the answer; if it offers more new words, say yes let's do it"},
+ {"wait_min": 3},
+ {"answer": "dunno"}
+]}
