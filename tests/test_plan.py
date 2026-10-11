@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import re
+
 from datetime import timedelta
 
 import pytest
 
 from macaw import pacing, plan, srs
 from macaw.agent import Agent, Text
-from macaw.db import iso
+from macaw.db import iso, parse
 
 from .conftest import UID, FakeLLM, at
 
@@ -66,9 +68,9 @@ def test_backlog_is_cleared_over_a_few_days():
 
 
 def test_rounds_grow_when_the_day_wont_fit():
-    end = NOW + timedelta(hours=12)  # 18 rounds of 40 minutes left
+    end = NOW + timedelta(hours=12)  # 12 rounds of an hour left
     assert pacing.round_size(NOW, end, 10, 1) == 1
-    assert pacing.round_size(NOW, end, 44, 1) == 3
+    assert pacing.round_size(NOW, end, 44, 1) == 4
     assert pacing.round_size(NOW, end, 44, 5) == 5  # never below the user's own setting
     assert pacing.round_size(end - timedelta(minutes=30), end, 500, 1) == pacing.MAX_ROUND
 
@@ -102,7 +104,7 @@ def test_plan_counts_todays_share_of_the_backlog(store, user):
     assert (p.overdue, p.quota, p.catch_up_days) == (44, 22, 2)
     assert p.new_cap == 0 and p.new_left == 0
     assert p.goal_left == 4 + 22
-    assert p.suggested_round == 2  # 26 cards over the ~18 rounds left before midnight
+    assert p.suggested_round == 3  # 26 cards over the ~12 hourly rounds left before midnight
 
     # Today's scheduled cards come first; doing left-over cards counts toward today's share.
     queue = srs.due_queue(store, user, NOW)
@@ -202,11 +204,34 @@ async def test_a_skipped_check_in_is_written_again_and_the_plan_saved_anyway(age
 async def test_falling_behind_the_plan_is_said_with_the_next_card(agent, llm, store, user):
     make_deck(store, reviews_today=30)
     plan.set_today(store, user, NOW - timedelta(hours=4), new_cards=0, round_size=2, reason=None, set_by="bot")
+    store.update_state(UID, slipped_at=iso(NOW - timedelta(hours=2)))  # a card was left waiting
     llm.script.append(lambda p, t: _ret("What does w0 mean?"))
     await agent.ask_next(UID, NOW + timedelta(hours=4))  # 18:00 in Berlin, nothing done since 08:00
     event = llm.prompts[-1].split("<event>")[1]
     assert "cards behind an even pace" in event
     assert store.state(UID)["nudge_at"]
+
+
+@pytest.mark.asyncio
+async def test_no_behind_nudge_for_someone_who_answered_every_round(agent, llm, store, user):
+    """Behind only because the rounds couldn't hold the day: that's not the user's doing."""
+    make_deck(store, reviews_today=30)
+    plan.set_today(store, user, NOW - timedelta(hours=4), new_cards=0, round_size=2, reason=None, set_by="bot")
+    llm.script.append(lambda p, t: _ret("What does w0 mean?"))
+    await agent.ask_next(UID, NOW + timedelta(hours=4))
+    assert "behind" not in llm.prompts[-1].split("<event>")[1]
+
+
+@pytest.mark.asyncio
+async def test_no_behind_nudge_right_after_talking_about_the_day(agent, llm, store, user):
+    make_deck(store, reviews_today=30)
+    plan.set_today(store, user, NOW - timedelta(hours=4), new_cards=0, round_size=2, reason=None, set_by="bot")
+    store.update_state(UID, slipped_at=iso(NOW - timedelta(hours=2)))
+    llm.script.append(lambda p, t: _ret("Busy day, I get it."))
+    await agent.on_user_message(UID, "sorry, busy afternoon", NOW + timedelta(hours=3, minutes=50))
+    llm.script.append(lambda p, t: _ret("What does w0 mean?"))
+    await agent.ask_next(UID, NOW + timedelta(hours=4))
+    assert "behind" not in llm.prompts[-1].split("<event>")[1]
 
 
 @pytest.mark.asyncio
@@ -227,40 +252,73 @@ async def test_rounds_get_bigger_while_behind(agent, llm, store):
 
 
 @pytest.mark.asyncio
-async def test_pause_while_behind_gets_pushback_once_then_is_respected(agent, llm, store):
+async def test_giving_up_the_day_while_behind_gets_one_case_made_but_holds(agent, llm, store):
     make_deck(store, reviews_overdue=20)
     llm.script.append(lambda p, t: _ret("What does w0 mean?"))
     await agent.ask_next(UID, NOW)
 
     async def stop(prompt, t):
-        out = await t["pause_reviews"]({})
-        assert out.startswith("NOT paused")
+        out = await t["pause_reviews"]({"rest_of_day": True})
+        assert "make your case once" in out
         return "Stopping now means..."
 
     llm.script.append(stop)
-    await agent.on_user_message(UID, "stop", NOW + timedelta(minutes=1))
-    assert store.state(UID)["active_card_id"]  # the question is still open
+    await agent.on_user_message(UID, "nah not today", NOW + timedelta(minutes=1))
+    st = store.state(UID)
+    # The pause holds while the case is made: no answer means nothing more today.
+    assert st["active_card_id"] is None
+    assert parse(st["next_ask_at"]) == srs.next_day_start(dict(store.get_user(UID)), NOW)
+    # Taking the offer: those few cards end the day.
+    assert store.day_plan(UID, "2026-10-07")["max_cards"] == 2  # the offer: one round of 2
 
-    async def insist(prompt, t):
-        out = await t["pause_reviews"]({"insist": True})
-        assert "withdrawn" in out
-        return "Okay."
-
-    llm.script.append(insist)
-    await agent.on_user_message(UID, "no, stop", NOW + timedelta(minutes=2))
-    assert store.state(UID)["active_card_id"] is None
-
-    # Later the same day a stop is simply respected.
-    store.update_state(UID, active_card_id=srs.due_queue(store, dict(store.get_user(UID)), NOW)[0]["id"],
-                       asked_at=iso(NOW + timedelta(hours=2)))
-
+    # Later the same day giving up is simply respected.
     async def stop_again(prompt, t):
-        out = await t["pause_reviews"]({})
-        assert "withdrawn" in out
+        out = await t["pause_reviews"]({"rest_of_day": True})
+        assert out.startswith("Paused for the rest of today")
         return "Sure."
 
     llm.script.append(stop_again)
-    await agent.on_user_message(UID, "stop", NOW + timedelta(hours=2, minutes=1))
+    await agent.on_user_message(UID, "no more today", NOW + timedelta(hours=2, minutes=1))
+
+
+@pytest.mark.asyncio
+async def test_no_case_made_when_they_give_a_reason_or_just_pause(agent, llm, store):
+    make_deck(store, reviews_overdue=20)
+    llm.script.append(lambda p, t: _ret("What does w0 mean?"))
+    await agent.ask_next(UID, NOW)
+
+    async def sick(prompt, t):
+        out = await t["pause_reviews"]({"rest_of_day": True, "has_reason": True})
+        assert out.startswith("Paused for the rest of today")
+        return "Rest up."
+
+    llm.script.append(sick)
+    await agent.on_user_message(UID, "i have a fever, can't today", NOW + timedelta(minutes=1))
+    assert store.state(UID)["pushback_day"] is None
+
+    async def later(prompt, t):
+        out = await t["pause_reviews"]({})
+        assert out.startswith("Paused:")
+        return "Sure."
+
+    llm.script.append(later)
+    await agent.on_user_message(UID, "later", NOW + timedelta(minutes=2))
+
+
+@pytest.mark.asyncio
+async def test_no_case_made_late_in_the_day(agent, llm, store):
+    make_deck(store, reviews_overdue=20)
+    late = NOW + timedelta(hours=8)  # 22:00 in Berlin
+    llm.script.append(lambda p, t: _ret("What does w0 mean?"))
+    await agent.ask_next(UID, late)
+
+    async def night(prompt, t):
+        out = await t["pause_reviews"]({"rest_of_day": True})
+        assert out.startswith("Paused for the rest of today")
+        return "Good night."
+
+    llm.script.append(night)
+    await agent.on_user_message(UID, "that's it for tonight, good night", late + timedelta(minutes=1))
 
 
 @pytest.mark.asyncio
@@ -516,3 +574,91 @@ def test_the_user_can_hand_the_round_size_back_to_the_plan(store, user):
     u = dict(store.get_user(UID))
     assert not u["round_fixed"] and not p.fixed_round
     assert p.round_size == p.suggested_round > 2
+
+
+@pytest.mark.asyncio
+async def test_notes_about_the_user_last_across_days(agent, llm, store):
+    make_deck(store, reviews_today=3)
+
+    async def note(prompt, t):
+        assert "YOUR NOTES ABOUT THE USER: none yet" in prompt
+        out = await t["save_note"]({"text": "Crunch week at work Mon 12 to Fri 16 Oct: about 10 minutes a day."})
+        assert out.startswith("Saved as note #")
+        return "Thanks for telling me."
+
+    llm.script.append(note)
+    await agent.on_user_message(UID, "next week is brutal at work", NOW)
+    llm.script.append(lambda p, t: _ret("ok"))
+    await agent.on_user_message(UID, "hi", NOW + timedelta(days=3))
+    assert "(written Wed 07 Oct): Crunch week at work Mon 12 to Fri 16 Oct" in llm.prompts[-1]
+
+    async def drop(prompt, t):
+        nid = int(re.search(r"#(\d+) \(written", prompt).group(1))
+        assert await t["remove_note"]({"note_id": nid}) == "Removed."
+        return "Glad it's over."
+
+    llm.script.append(drop)
+    await agent.on_user_message(UID, "deadline done!", NOW + timedelta(days=9))
+    assert store.memory_notes(UID) == []
+
+
+@pytest.mark.asyncio
+async def test_n_more_today_is_counted_from_what_is_done(agent, llm, store, user):
+    make_deck(store, reviews_today=20)
+    for c in srs.due_queue(store, user, NOW)[:4]:
+        srs.grade(store, user, c["id"], 3, "claude", None, NOW)
+
+    async def more(prompt, t):
+        out = await t["set_today_plan"]({"new_cards": 0, "more_today": 10})
+        assert "at most 14 different cards" in out
+        return "Ten more it is."
+
+    llm.script.append(more)
+    await agent.on_user_message(UID, "i can do 10 more tonight", NOW + timedelta(minutes=5))
+    assert store.day_plan(UID, "2026-10-07")["max_cards"] == 14
+
+
+@pytest.mark.asyncio
+async def test_a_due_word_named_in_a_reply_is_postponed(agent, llm, store, user):
+    deck_id = store.create_deck(UID, "English", "vocabulary", ["word", "meaning", "example", "notes"])
+    for w in ("capricious", "obstinate", "laconic"):
+        store.add_note(deck_id, {"word": w, "meaning": f"meaning of {w}"}, w, reverse=False)
+        card = max(store.user_cards(UID), key=lambda c: c["id"])
+        store.set_card_schedule(card["id"], {
+            "state": srs.REVIEW, "step": None, "stability": 5.0, "difficulty": 5.0,
+            "due": iso(NOW - timedelta(minutes=30)), "last_review": iso(NOW - timedelta(days=5)),
+        })
+    plan.set_today(store, user, NOW, new_cards=0, round_size=3, reason=None, set_by="bot")
+    llm.script.append(lambda p, t: _ret("What does capricious mean?"))
+    await agent.ask_next(UID, NOW)
+    first = store.state(UID)["active_card_id"]
+
+    async def grade(prompt, t):
+        await t["grade_card"]({"card_id": first, "rating": "Good"})
+        return "Yes. It's not the same as obstinate, which is the opposite. And what does laconic mean?"
+
+    llm.script.append(grade)
+    await agent.on_user_message(UID, "changes mood a lot", NOW + timedelta(minutes=1))
+    left = {store.note(c["note_id"])["sort_key"] for c in srs.due_queue(store, user, NOW + timedelta(minutes=2))}
+    assert left == {"laconic"}  # obstinate was shown with its meaning; laconic is the one being asked
+
+
+@pytest.mark.asyncio
+async def test_time_spent_answering_a_round_comes_off_the_wait(agent, llm, store, user):
+    make_deck(store, reviews_today=30)
+    plan.set_today(store, user, NOW, new_cards=0, round_size=1, reason=None, set_by="bot")
+    llm.script.append(lambda p, t: _ret("What does w0 mean?"))
+    await agent.ask_next(UID, NOW)
+    card = store.state(UID)["active_card_id"]
+    end = NOW + timedelta(minutes=20)  # took 20 minutes to answer
+
+    async def grade(prompt, t):
+        await t["grade_card"]({"card_id": card, "rating": "Good"})
+        return "Right."
+
+    llm.script.append(grade)
+    await agent.on_user_message(UID, "m0", end)
+    u = dict(store.get_user(UID))
+    p = plan.build(store, u, end)
+    full = pacing.gap_until_next_session(end, srs.awake_end(u, end), p.goal_left, p.round_size)
+    assert parse(store.state(UID)["next_ask_at"]) == end + max(full - timedelta(minutes=20), pacing.MIN_ROUND_GAP)

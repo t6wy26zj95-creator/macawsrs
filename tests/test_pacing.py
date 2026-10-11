@@ -11,7 +11,7 @@ from .conftest import at
 def test_gap_spreads_sessions_over_the_day():
     now = at("2026-10-07 10:00")
     end = at("2026-10-08 00:00")  # 14 h left
-    gap = pacing.gap_until_next_session(now, end, due_count=13, cards_per_session=1)
+    gap = pacing.gap_until_next_session(now, end, due_count=14, cards_per_session=1)
     assert gap == timedelta(hours=1)
     assert pacing.gap_until_next_session(now, end, 1000, 1) == pacing.MIN_GAP
     assert pacing.gap_until_next_session(now, end, 1, 1) == pacing.MAX_GAP

@@ -28,7 +28,8 @@ def gap_until_next_session(now: datetime, awake_end: datetime, due_count: int, c
     remaining = awake_end - now
     if remaining <= timedelta(0):
         return MIN_GAP
-    gap = remaining / (sessions_left + 1)
+    # Measured from the end of a round; the last round lands near the end of the day.
+    gap = remaining / sessions_left
     return max(MIN_GAP, min(MAX_GAP, gap))
 
 
@@ -206,7 +207,9 @@ FAR_BEHIND_AT = 30
 CATCH_UP_PER_DAY = 25
 MAX_CATCH_UP_DAYS = 7
 # Rounds are planned this far apart, so a bigger day means bigger rounds, not more interruptions.
-ROUND_SPACING = timedelta(minutes=40)
+# A round every hour or so (the wait after a round plus answering it), so the day's
+# target fits in the rounds when the user answers each one.
+ROUND_SPACING = timedelta(minutes=60)
 MAX_ROUND = 10
 # Lots of forgotten cards lately: the material is hard, so fewer new ones.
 HARD_AGAIN_RATE = 0.3

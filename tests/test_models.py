@@ -290,6 +290,9 @@ async def test_times_reach_the_model_only_when_asked(store):
     assert not clock.search(llm.prompts[-1])
     await agent.on_user_message(UID, "when is the next card?", NOW)
     assert clock.search(llm.prompts[-1])
+    # An answer that explains a word with "when" isn't asking about timing.
+    await agent.on_user_message(UID, "laconic is when someone uses very few words", NOW)
+    assert not clock.search(llm.prompts[-1])
 
 
 def test_free_provider_puts_gemini_before_groq():
