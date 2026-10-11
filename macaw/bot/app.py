@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import logging
 import secrets
 import tempfile
@@ -25,6 +26,7 @@ from ..config import Config
 from ..db import Store, iso, parse
 from ..llm import CLAUDE, FREE, LLMError
 from ..prompts import GREETING
+from ..voice import Transcriber, TranscriptionError
 from . import menus, render
 from .transfer import Transfer
 
@@ -45,6 +47,9 @@ class App:
         self.locks: dict[int, asyncio.Lock] = {}
         on_disk = config.db_path and str(config.db_path) != ":memory:"
         self.transfer = Transfer(store, bot, config.db_path.parent if on_disk else Path(tempfile.gettempdir()) / "macaw")
+        self.transcriber = (
+            Transcriber(config.voice_api_key, config.voice_model) if config.voice_api_key else None
+        )
         self.router = Router()
         self._register()
 
@@ -263,18 +268,23 @@ class App:
             if not self._allowed(m.from_user and m.from_user.id):
                 await m.answer("Sorry, this is a private bot.")
                 return
-            uid = m.from_user.id
-            self.store.ensure_user(uid, m.chat.id, self.config.default_timezone)
-            pending = self.store.pending_input(uid)
-            if pending and pending.get("kind") == "rename_deck":
-                await self._finish_rename(m, pending)
+            self.store.ensure_user(m.from_user.id, m.chat.id, self.config.default_timezone)
+            await self._on_text(m, m.text)
+
+        @r.message(F.voice | F.audio | F.video_note)
+        async def voice(m: Message):
+            if not self._allowed(m.from_user and m.from_user.id):
+                await m.answer("Sorry, this is a private bot.")
                 return
-            await self._chat(m, m.text)
+            self.store.ensure_user(m.from_user.id, m.chat.id, self.config.default_timezone)
+            text = await self._transcribe(m)
+            if text:
+                await self._on_text(m, text)
 
         @r.message()
         async def other(m: Message):
             if self._allowed(m.from_user and m.from_user.id):
-                await m.answer("I can only read text, and Anki decks (.apkg files).")
+                await m.answer("I can only read text, voice messages, and Anki decks (.apkg files).")
 
         @r.callback_query(F.data.startswith("p:"))
         async def proposal_cb(c: CallbackQuery):
@@ -417,6 +427,43 @@ class App:
         )
         return text, kb
 
+    async def _on_text(self, m: Message, text: str) -> None:
+        """A typed message, or the words of a voice message."""
+        pending = self.store.pending_input(m.from_user.id)
+        if pending and pending.get("kind") == "rename_deck":
+            await self._finish_rename(m, pending, text)
+            return
+        await self._chat(m, text)
+
+    async def _transcribe(self, m: Message) -> str | None:
+        """The words of a voice message, or None after telling the user why not."""
+        if self.transcriber is None:
+            await m.answer("I can't listen to voice messages yet (no Groq key is set up). Please type instead.")
+            return None
+        if m.voice:
+            media, name = m.voice, "voice.ogg"
+        elif m.video_note:
+            media, name = m.video_note, "video.mp4"
+        else:
+            media, name = m.audio, m.audio.file_name or "audio.mp3"
+        try:
+            async with self.typing(m.chat.id):
+                buf = io.BytesIO()
+                await self.bot.download(media, destination=buf)
+                text = await self.transcriber.transcribe(buf.getvalue(), name)
+        except TranscriptionError as e:
+            log.warning("transcription failed: %s", e)
+            await m.answer("Sorry, I couldn't make out that voice message. Try again, or type it.")
+            return None
+        except Exception:
+            log.exception("voice message download failed")
+            await m.answer("Sorry, I couldn't get that voice message. Try again, or type it.")
+            return None
+        if not text:
+            await m.answer("I didn't hear any words in that voice message.")
+            return None
+        return text
+
     async def _chat(self, m: Message, text: str) -> None:
         uid = m.from_user.id
         async with self.lock(uid):
@@ -441,11 +488,11 @@ class App:
         self.store.delete_note(note_id)
         self.store.log_message(user_id, "note", f"note #{note_id} deleted")
 
-    async def _finish_rename(self, m: Message, pending: dict[str, Any]) -> None:
+    async def _finish_rename(self, m: Message, pending: dict[str, Any], text: str) -> None:
         uid = m.from_user.id
         self.store.set_pending_input(uid, None)
         deck = self.store.deck(pending["deck_id"])
-        name = (m.text or "").strip()
+        name = text.strip().rstrip(".") if not m.text else text.strip()
         if deck is None or deck["user_id"] != uid:
             return
         if not name or len(name) > 60:
