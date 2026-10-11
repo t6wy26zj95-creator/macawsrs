@@ -240,7 +240,7 @@ def status_of(b: Mapping[str, Any]) -> str:
 
 def due_queue(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict[str, Any]]:
     """Cards to review now, in order: learning cards that are due, then review
-    cards due today, then new cards within each deck's daily limit.
+    cards scheduled for today, then ones left over from earlier days, then new cards within each deck's daily limit.
     Daily review limits are per deck, as in Anki. While there is a backlog, fewer
     new cards come in (see pacing.new_card_cap), so it doesn't keep growing."""
     ds = day_start(user, now)
@@ -274,7 +274,9 @@ def due_queue(store: Store, user: Mapping[str, Any], now: datetime) -> list[dict
             review.append(item)
 
     learning.sort(key=lambda c: c["due"])
-    review.sort(key=lambda c: c["due"])
+    # Today's scheduled reviews come before cards left over from earlier days: done on time
+    # they don't join the pile, and the left-over ones are worked down by today's share.
+    review.sort(key=lambda c: (parse(c["due"]) < ds, c["due"]))
     new.sort(key=lambda c: (c["created_at"], c["ord"]))
 
     out = list(learning)

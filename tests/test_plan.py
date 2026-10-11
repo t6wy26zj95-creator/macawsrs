@@ -102,10 +102,12 @@ def test_plan_counts_todays_share_of_the_backlog(store, user):
     assert (p.overdue, p.quota, p.catch_up_days) == (44, 22, 2)
     assert p.new_cap == 0 and p.new_left == 0
     assert p.goal_left == 4 + 22
-    assert p.round_size == 2  # 26 cards over the ~18 rounds left before midnight
+    assert p.suggested_round == 2  # 26 cards over the ~18 rounds left before midnight
 
-    # Doing left-over cards counts toward today's share.
-    first = srs.due_queue(store, user, NOW)[0]
+    # Today's scheduled cards come first; doing left-over cards counts toward today's share.
+    queue = srs.due_queue(store, user, NOW)
+    assert all(c["due"] > queue[-1]["due"] for c in queue[:4])
+    first = queue[-1]
     srs.grade(store, user, first["id"], 3, "claude", None, NOW)
     p = plan.build(store, user, NOW + timedelta(minutes=1))
     assert (p.overdue, p.overdue_at_start, p.goal_left) == (43, 44, 25)
@@ -340,15 +342,13 @@ async def test_done_for_today_means_nothing_more_today(agent, llm, store, user):
     assert st["next_ask_at"] == iso(srs.next_day_start(user, NOW))
 
 
-def test_rounds_grow_at_most_twice_the_plan_unless_the_user_chose_them(store, user):
+def test_the_round_size_stays_as_planned_all_day(store, user):
     make_deck(store, reviews_overdue=60, reviews_today=40)
     late = NOW + timedelta(hours=9)  # little of the day left for a lot of cards
     plan.set_today(store, user, NOW, 0, 3, None, "bot")
     p = plan.build(store, user, late)
-    assert (p.planned_round, p.round_size) == (3, 6)
-    assert "6 cards a round now (planned 3" in "\n".join(plan.report(store, user, late, p))
-    plan.set_today(store, user, NOW, 0, 3, "he wants small rounds", "bot", fixed_round=True)
-    assert plan.build(store, user, late).round_size == 3
+    assert p.round_size == 3
+    assert "3 cards a round (stays all day)" in "\n".join(plan.report(store, user, late, p))
 
 
 def test_any_due_card_done_counts_toward_todays_target(store, user):
@@ -356,7 +356,7 @@ def test_any_due_card_done_counts_toward_todays_target(store, user):
     p = plan.build(store, user, NOW)
     assert p.goal_left == 25
     line = "\n".join(plan.report(store, user, NOW, p))
-    assert "Still to do today: 25 (today's target is all of today's scheduled cards plus about 20" in line
+    assert "Still to do today: 25 = 5 for today + 20 of the 60 left over (today's share" in line
     # Doing more left-over cards than today's share still brings today's count down.
     for c in [c for c in srs.due_queue(store, user, NOW) if srs._left_over(c, srs.day_start(user, NOW), NOW)][:24]:
         srs.grade(store, user, c["id"], 3, "claude", None, NOW)
@@ -507,27 +507,12 @@ async def test_a_card_left_open_overnight_after_studying_starts_a_fresh_morning(
     assert events and "daily check-in" in events[0]
 
 
-@pytest.mark.asyncio
-async def test_a_bigger_round_is_told_once_and_does_not_shrink_back(agent, llm, store, user):
+
+def test_the_user_can_hand_the_round_size_back_to_the_plan(store, user):
     make_deck(store, reviews_overdue=60, reviews_today=40)
-    late = NOW + timedelta(hours=9)
-    plan.set_today(store, user, NOW, 0, 3, None, "bot")
-    store.update_state(UID, nudge_at=iso(late))  # the behind-pace nudge was just given
-    events = []
-
-    def card(prompt, t):
-        events.append(prompt)
-        return _ret("What does it mean?")
-
-    llm.script.append(card)
-    await agent.ask_next(UID, late)
-    assert "This round is 6 cards, not the 3 planned" in events[-1]
-    # Most of today's cards get done: the rest would fit in smaller rounds now, but the
-    # user was told 6, so it stays 6 and isn't announced again.
-    for c in srs.due_queue(store, user, late)[:60]:
-        srs.grade(store, user, c["id"], 3, "claude", None, late)
-    store.update_state(UID, active_card_id=None, session_count=0, round_target=None)
-    assert plan.build(store, user, late).round_size == 6
-    llm.script.append(card)
-    await agent.ask_next(UID, late + timedelta(minutes=5))
-    assert "not the 3 planned" not in events[-1]
+    plan.set_today(store, user, NOW, 0, 2, "he wants small rounds", "bot", fixed_round=True)
+    assert plan.build(store, dict(store.get_user(UID)), NOW).round_size == 2
+    p = plan.set_today(store, user, NOW, 0, 99, "back to normal", "bot", plan_round=True)
+    u = dict(store.get_user(UID))
+    assert not u["round_fixed"] and not p.fixed_round
+    assert p.round_size == p.suggested_round > 2
