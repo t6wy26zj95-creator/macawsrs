@@ -45,6 +45,9 @@ class Config:
     # the local port its web server listens on.
     reader_url: str | None = None
     reader_port: int = 8090
+    # cloudflared's local status address when the reader goes through a quick
+    # tunnel; its public address is then read from there (READER_URL is ignored).
+    reader_tunnel: str | None = None
 
     @property
     def free_label(self) -> str:
@@ -108,6 +111,7 @@ def load_config() -> Config:
         voice_model=os.environ.get("VOICE_MODEL") or "whisper-large-v3",
         reader_url=_reader_url(os.environ.get("READER_URL", "")),
         reader_port=int(os.environ.get("READER_PORT") or 8090),
+        reader_tunnel=os.environ.get("READER_TUNNEL", "").strip() or None,
     )
 
 

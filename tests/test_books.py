@@ -157,3 +157,19 @@ async def test_server_flow(client):
     assert (await client.delete(f"/api/books/{b['id']}", headers=h)).status == 204
     assert await (await client.get("/api/books", headers=h)).json() == []
     assert (await client.get("/")).status == 200
+
+
+async def test_tunnel_url():
+    from aiohttp import web
+
+    from macaw.reader.tunnel import tunnel_url
+
+    app = web.Application()
+    app.router.add_get("/quicktunnel", lambda r: web.json_response({"hostname": "abc-def.trycloudflare.com"}))
+    srv = TestServer(app)
+    await srv.start_server()
+    try:
+        assert await tunnel_url(f"127.0.0.1:{srv.port}") == "https://abc-def.trycloudflare.com/"
+    finally:
+        await srv.close()
+    assert await tunnel_url(f"127.0.0.1:{srv.port}") is None  # nothing listening any more
