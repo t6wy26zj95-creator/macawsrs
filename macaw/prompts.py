@@ -196,3 +196,16 @@ Scheduling uses FSRS, the same algorithm as Anki.
 Let's start with your first deck. What are you learning? For example: "make an English vocabulary deck". \
 And tell me your city or timezone so I don't ping you at night.\
 """
+
+
+# For the book reader: a word the reader tapped, explained right there on the page.
+EXPLAIN_PROMPT = """\
+You explain a word that a language learner tapped while reading a book. Say what it means in \
+this exact sentence, not every meaning it can have.
+- First line: the word in its dictionary form and the part of speech in brackets, e.g. "look up (phrasal verb)". \
+If the word is part of a phrasal verb, idiom or set phrase here, give the whole phrase instead.
+- Then two to four short sentences in plain, simple English: what it means here and why it fits this \
+sentence. Add a near synonym when there is a good one. If the book is not in English, still explain in \
+English and give the meaning of the word as used here.
+- No greeting, no emoji, no markdown, no headings, no lists. Do not repeat the sentence back.
+"""

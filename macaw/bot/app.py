@@ -52,6 +52,7 @@ class App:
         data_dir = config.db_path.parent if on_disk else Path(tempfile.gettempdir()) / "macaw"
         self.transfer = Transfer(store, bot, data_dir)
         self.library = Library(store, data_dir)
+        self._background: set[asyncio.Task] = set()
         self.reader_url: str | None = None
         self.transcriber = (
             Transcriber(config.voice_api_key, config.voice_model) if config.voice_api_key else None
@@ -646,6 +647,31 @@ class App:
             await c.answer()
 
     # ================= timer =================
+
+    async def explain_word(self, user_id: int, word: str, sentence: str, context: str, book: str) -> str:
+        """For the reader: a tapped word explained in its sentence."""
+        return await self.agent.explain_word(user_id, word, sentence, context, book)
+
+    def add_book_word(self, user_id: int, word: str, sentence: str, meaning: str, book: str) -> None:
+        """For the reader's Add to Deck: the bot makes the card in the chat, the usual way."""
+        user = self.store.get_user(user_id)
+        if not user:
+            return
+        text = f'From the book reader: make a card for "{word}"'
+        if book:
+            text += f' as it is used in the book "{book}"'
+        text += f'.\nThe sentence: "{sentence}"'
+        if meaning:
+            text += f"\nWhat it means there: {meaning}"
+
+        async def run() -> None:
+            async with self.lock(user_id):
+                await self.run_llm(user_id, user["chat_id"],
+                                   lambda: self.agent.on_user_message(user_id, text), notify=True)
+
+        task = asyncio.create_task(run())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     async def set_reader_url(self, url: str | None) -> None:
         """Remembers the reader's address and points the Books button next to the text field at it."""

@@ -83,7 +83,7 @@ fi
 say "Waiting for the tunnel's address (up to 1 minute)"
 HOST=""
 for _ in $(seq 1 30); do
-  HOST="$(curl -fsS --max-time 3 "http://127.0.0.1:$STATUS_PORT/quicktunnel" 2>/dev/null | sed -n 's/.*"hostname":"\([^"]*\)".*/\1/p')"
+  HOST="$(curl -fsS --max-time 3 "http://127.0.0.1:$STATUS_PORT/quicktunnel" 2>/dev/null | sed -n 's/.*"hostname":"\([^"]*\)".*/\1/p' || true)"
   [[ -n "$HOST" ]] && break
   sleep 2
 done

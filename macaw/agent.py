@@ -19,7 +19,7 @@ from .db import Store, iso, parse
 from .leak import contains_answer
 from .lookalike import find_lookalikes
 from .llm import LLMError, LLMProvider, Models, ToolSpec
-from .prompts import SYSTEM_PROMPT
+from .prompts import EXPLAIN_PROMPT, SYSTEM_PROMPT
 from .templates import (
     DECK_TYPES,
     answer_key,
@@ -317,6 +317,22 @@ class Agent:
             slipped_at=iso(now),
         )
         return actions
+
+    async def explain_word(self, user_id: int, word: str, sentence: str, context: str = "", book: str = "") -> str:
+        """What a word tapped in the book reader means in that very sentence. One call, no tools."""
+        user = self.store.get_user(user_id)
+        llm = self.models.for_user(dict(user)) if self.models and user else self.llm
+        prompt = (
+            (f"Book: {book}\n" if book else "")
+            + (f"Passage: {context}\n" if context and context != sentence else "")
+            + f"Sentence: {sentence}\n"
+            + f"Word tapped: {word}"
+        )
+        reply = strip_emoji(await llm.run(EXPLAIN_PROMPT, prompt, []))
+        text = "\n".join(line.strip() for line in reply.splitlines()).strip()
+        if not text:
+            raise LLMError("the model gave an empty explanation")
+        return text
 
     # ================= turn plumbing =================
 

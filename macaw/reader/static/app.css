@@ -316,3 +316,31 @@ mark.hit { background: #ffd60a; color: #000; }
 
 .gate { display: grid; place-items: center; min-height: 100vh; text-align: center; padding: 30px; color: var(--fg2); line-height: 1.5; }
 .gate b { display: block; color: var(--fg); font-size: 20px; margin-bottom: 8px; }
+
+/* Tap a word: what it means here */
+::highlight(look) { background: rgba(10, 132, 255, .35); }
+.look {
+  position: absolute; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px 12px; border-radius: 20px;
+  pointer-events: auto; overflow-y: auto; -webkit-overflow-scrolling: touch; font-family: var(--ui);
+  transform: scale(.85); opacity: 0; transition: transform .2s cubic-bezier(.2, .9, .25, 1.15), opacity .15s;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .4); -webkit-backdrop-filter: blur(30px); backdrop-filter: blur(30px);
+}
+.look.in { transform: none; opacity: 1; }
+.look.dark { background: rgba(44, 44, 46, .96); color: #fff; --dim: rgba(235, 235, 245, .6); --btn: rgba(255, 255, 255, .1); }
+.look.light { background: rgba(255, 255, 255, .97); color: #000; --dim: rgba(60, 60, 67, .6); --btn: rgba(0, 0, 0, .06); }
+.look-head b { font-family: var(--title); font-size: 22px; font-weight: 700; }
+.look-text { font-size: 15.5px; line-height: 1.45; white-space: pre-line; min-height: 22px; }
+.look-err { color: var(--dim); }
+.look-retry { color: var(--accent); font-weight: 600; }
+.look-wait { display: inline-flex; gap: 5px; padding: 6px 0; }
+.look-wait i { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); animation: look-dot 1s infinite ease-in-out; }
+.look-wait i:nth-child(2) { animation-delay: .15s; }
+.look-wait i:nth-child(3) { animation-delay: .3s; }
+@keyframes look-dot { 0%, 80%, 100% { opacity: .25; transform: scale(.8); } 40% { opacity: 1; transform: none; } }
+.look-add {
+  display: flex; align-items: center; justify-content: center; gap: 8px; padding: 11px; border-radius: 14px;
+  background: var(--btn); color: var(--accent); font-size: 16px; font-weight: 600; flex-shrink: 0;
+}
+.look-add svg { width: 18px; height: 18px; }
+.look-add.done { color: #30d158; }
+.look-add:disabled:not(.done) { opacity: .5; }
