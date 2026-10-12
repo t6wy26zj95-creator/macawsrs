@@ -44,7 +44,8 @@ HAD_CADDY=0
 command -v caddy >/dev/null && HAD_CADDY=1
 user80="$(port_user 80)"
 if port_busy 80 && [[ "$user80" != "caddy" ]]; then
-  fail "port 80 is already used by '${user80:-another program}'. The certificate needs it, so nothing was changed."
+  fail "port 80 is already used by '${user80:-another program}'. The certificate needs it, so nothing was changed.
+Use the version that needs no ports instead: sudo bash /opt/macaw/app/deploy/reader-tunnel.sh"
 fi
 user443="$(port_user 443)"
 if ! port_busy 443 || [[ "$user443" == "caddy" ]]; then
@@ -52,7 +53,8 @@ if ! port_busy 443 || [[ "$user443" == "caddy" ]]; then
 else
   user8443="$(port_user 8443)"
   if port_busy 8443 && [[ "$user8443" != "caddy" ]]; then
-    fail "ports 443 and 8443 are both in use (by '${user443:-?}' and '${user8443:-?}'). Nothing was changed."
+    fail "ports 443 and 8443 are both in use (by '${user443:-?}' and '${user8443:-?}'). Nothing was changed.
+Use the version that needs no ports instead: sudo bash /opt/macaw/app/deploy/reader-tunnel.sh"
   fi
   HTTPS_PORT=8443
   say "Port 443 is used by '${user443:-another program}', so the reader will use port 8443. That program is not touched."

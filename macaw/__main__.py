@@ -7,7 +7,7 @@ import contextlib
 import logging
 
 from aiogram import Bot
-from aiogram.types import BotCommand, BotCommandScopeChat, MenuButtonCommands, MenuButtonWebApp, WebAppInfo
+from aiogram.types import BotCommand, BotCommandScopeChat
 
 from .agent import Agent
 from .bot.app import App, build_dispatcher
@@ -63,23 +63,20 @@ async def main() -> None:
         # Fails if the owner hasn't opened the bot yet; the default menu still works.
         with contextlib.suppress(Exception):
             await bot.set_my_commands(owner_commands, scope=BotCommandScopeChat(chat_id=owner))
-    # The menu button next to the text field opens the reader once it has an https address.
-    with contextlib.suppress(Exception):
-        if config.reader_url:
-            await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Books", web_app=WebAppInfo(url=config.reader_url)))
-        else:
-            await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
     web = await reader.start(
         reader.ReaderServer(config.bot_token, app._allowed, app.library, store),
         "127.0.0.1",
         config.reader_port,
     )
     ticker = asyncio.create_task(app.ticker())
+    # The Books button next to the text field opens the reader once it has an https address.
+    url_watch = asyncio.create_task(app.watch_reader_url())
     try:
         # Long polling: outbound connections only, no open ports.
         await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:
         ticker.cancel()
+        url_watch.cancel()
         if web:
             await web.cleanup()
         await bot.session.close()

@@ -89,6 +89,12 @@ sudo bash /opt/macaw/app/deploy/reader-https.sh
 
 It never takes a port another program uses: if 443 is busy (VPNs often use it), the reader gets port 8443. Port 80 must be free, and both ports must be open in the hosting company's firewall. The script writes `READER_URL` into `/opt/macaw/.env` and restarts the bot.
 
+If ports 80 and 443 are already taken (a VPN or another web app in Docker), use the tunnel instead. It opens no port at all: cloudflared connects out to Cloudflare and gets a free `https://….trycloudflare.com` address. That address changes whenever the tunnel restarts; the bot checks every 30 seconds and updates the Books button itself. Undo with `sudo systemctl disable --now macaw-tunnel`.
+
+```bash
+sudo bash /opt/macaw/app/deploy/reader-tunnel.sh
+```
+
 The service is capped at 768 MB of memory and half a CPU core so it can't starve the other bots on the server. Adjust `MemoryMax` and `CPUQuota` in `deploy/macaw.service` if needed.
 
 ## Development

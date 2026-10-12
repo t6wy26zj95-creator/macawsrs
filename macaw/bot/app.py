@@ -16,7 +16,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, Message, WebAppInfo
+from aiogram.types import CallbackQuery, MenuButtonCommands, MenuButtonWebApp, Message, WebAppInfo
 from aiogram.types import InlineKeyboardButton as Btn
 from aiogram.types import InlineKeyboardMarkup as Kb
 
@@ -27,6 +27,7 @@ from ..db import Store, iso, parse
 from ..llm import CLAUDE, FREE, LLMError
 from ..prompts import GREETING
 from ..reader.server import Library
+from ..reader.tunnel import tunnel_url
 from ..voice import Transcriber, TranscriptionError
 from . import menus, render
 from .transfer import Transfer
@@ -51,6 +52,7 @@ class App:
         data_dir = config.db_path.parent if on_disk else Path(tempfile.gettempdir()) / "macaw"
         self.transfer = Transfer(store, bot, data_dir)
         self.library = Library(store, data_dir)
+        self.reader_url: str | None = None
         self.transcriber = (
             Transcriber(config.voice_api_key, config.voice_model) if config.voice_api_key else None
         )
@@ -263,7 +265,7 @@ class App:
         async def books_cmd(m: Message):
             if not self._allowed(m.from_user and m.from_user.id):
                 return
-            if not self.config.reader_url:
+            if not self.reader_url:
                 await m.answer(
                     "The book reader isn't switched on yet: it needs a web address with https. "
                     "Once that's set up, this opens your library.",
@@ -423,7 +425,7 @@ class App:
             await self._menu(c)
 
     def _reader_kb(self, label: str) -> Kb:
-        return Kb(inline_keyboard=[[Btn(text=label, web_app=WebAppInfo(url=self.config.reader_url))]])
+        return Kb(inline_keyboard=[[Btn(text=label, web_app=WebAppInfo(url=self.reader_url))]])
 
     async def _add_book(self, m: Message) -> None:
         doc = m.document
@@ -446,7 +448,7 @@ class App:
             await m.answer("Something went wrong reading that book.", parse_mode=None)
             return
         text = f"Added to your library: {row['title']}" + (f" by {row['author']}" if row["author"] else "") + "."
-        kb = self._reader_kb("Read") if self.config.reader_url else None
+        kb = self._reader_kb("Read") if self.reader_url else None
         await m.answer(text, reply_markup=kb, parse_mode=None)
 
     async def _redeem(self, m: Message, code: str) -> None:
@@ -644,6 +646,29 @@ class App:
             await c.answer()
 
     # ================= timer =================
+
+    async def set_reader_url(self, url: str | None) -> None:
+        """Remembers the reader's address and points the Books button next to the text field at it."""
+        self.reader_url = url
+        try:
+            if url:
+                await self.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Books", web_app=WebAppInfo(url=url)))
+            else:
+                await self.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        except Exception:
+            log.warning("couldn't set the Books menu button", exc_info=True)
+
+    async def watch_reader_url(self) -> None:
+        """Through a quick tunnel the address changes when the tunnel restarts; follow it."""
+        if not self.config.reader_tunnel:
+            await self.set_reader_url(self.config.reader_url)
+            return
+        while True:
+            url = await tunnel_url(self.config.reader_tunnel)
+            if url and url != self.reader_url:
+                log.info("reader address is now %s", url)
+                await self.set_reader_url(url)
+            await asyncio.sleep(30)
 
     async def ticker(self) -> None:
         while True:
