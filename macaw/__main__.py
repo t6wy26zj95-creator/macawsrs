@@ -7,13 +7,14 @@ import contextlib
 import logging
 
 from aiogram import Bot
-from aiogram.types import BotCommand, BotCommandScopeChat
+from aiogram.types import BotCommand, BotCommandScopeChat, MenuButtonCommands, MenuButtonWebApp, WebAppInfo
 
 from .agent import Agent
 from .bot.app import App, build_dispatcher
 from .config import load_config
 from .db import Store
 from .llm import Models, make_free_provider, make_provider
+from .reader import server as reader
 
 
 async def main() -> None:
@@ -49,6 +50,7 @@ async def main() -> None:
         BotCommand(command="decks", description="Your decks and their settings"),
         BotCommand(command="review", description="Review a card now"),
         BotCommand(command="export", description="Export decks as an Anki file"),
+        BotCommand(command="books", description="Open your book library"),
         BotCommand(command="settings", description="Timezone, quiet hours, reminders"),
         BotCommand(command="model", description="Which AI model you're using"),
     ]
@@ -61,12 +63,25 @@ async def main() -> None:
         # Fails if the owner hasn't opened the bot yet; the default menu still works.
         with contextlib.suppress(Exception):
             await bot.set_my_commands(owner_commands, scope=BotCommandScopeChat(chat_id=owner))
+    # The menu button next to the text field opens the reader once it has an https address.
+    with contextlib.suppress(Exception):
+        if config.reader_url:
+            await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Books", web_app=WebAppInfo(url=config.reader_url)))
+        else:
+            await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    web = await reader.start(
+        reader.ReaderServer(config.bot_token, app._allowed, app.library, store),
+        "127.0.0.1",
+        config.reader_port,
+    )
     ticker = asyncio.create_task(app.ticker())
     try:
         # Long polling: outbound connections only, no open ports.
         await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:
         ticker.cancel()
+        if web:
+            await web.cleanup()
         await bot.session.close()
 
 

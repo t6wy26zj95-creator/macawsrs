@@ -16,7 +16,7 @@ Macaw is a Telegram bot for spaced repetition that talks instead of flipping fla
 - **Anki export:** /export or "Export to Anki" in /decks sends an .apkg with scheduling and review history, for Anki, AnkiMobile and AnkiDroid. Imported notes go back as their original note type, with Anki's formatting and media kept for fields you didn't change, so Anki updates its own notes instead of making copies. Anki never takes over progress for cards it already has; to move the progress from the bot into Anki, delete the deck in Anki first, then import.
 - **Deck stats:** /decks shows per deck how many cards are new, learning, young and mature (interval of 21 days or more, as in Anki), and lists the cards still due today.
 
-Planned next: an ebook reader.
+- **Book reader (Mini App):** a library and reader after Apple Books. The + button adds EPUB, FB2 or TXT books (or send the file to the bot). Covers on a shelf with reading progress; Home with books in progress; search by title or author. The reader opens with the cover flying out, shows the book title and "page x of y", and its menu has Contents, Search Book, Themes & Settings (six themes, text size, font, line spacing, margins, justify, bold), Share, rotation lock, scrolling or page-turning view, bookmarks, and a scrubber to move through the book. Your place, bookmarks and look are saved on the server. Open it with the Books button next to the message field, or /books. It needs an https address; see "Book reader" below.
 
 ## How it is built
 
@@ -28,6 +28,7 @@ Planned next: an ebook reader.
 | Pacing and reminder rules | `macaw/pacing.py` |
 | Answer-leak check | `macaw/leak.py` |
 | Anki .apkg reading and writing | `macaw/apkg.py`, chat flow in `macaw/bot/transfer.py` |
+| Book reader Mini App: web server, pages | `macaw/reader/`, books parsed in `macaw/books.py` |
 | Storage (SQLite) | `macaw/db.py` |
 | Claude via your Pro subscription | `macaw/llm/claude.py` |
 | Free model (Gemini, Groq or any OpenAI-style API) | `macaw/llm/openai_compat.py` |
@@ -79,6 +80,14 @@ sudo systemctl stop macaw       # stop the bot
 ```
 
 The database is `/opt/macaw/data/macaw.sqlite3`; a copy is saved daily in `/opt/macaw/data/backups` (last 14 days kept).
+
+**Book reader.** The reader's web server runs inside the bot and listens on this server only (port 8090). Telegram opens Mini Apps only from an https address, so it needs one in front of it. One command sets that up for free with Caddy and an `<your-ip>.sslip.io` address (or your own domain if you add it after the command):
+
+```bash
+sudo bash /opt/macaw/app/deploy/reader-https.sh
+```
+
+It never takes a port another program uses: if 443 is busy (VPNs often use it), the reader gets port 8443. Port 80 must be free, and both ports must be open in the hosting company's firewall. The script writes `READER_URL` into `/opt/macaw/.env` and restarts the bot.
 
 The service is capped at 768 MB of memory and half a CPU core so it can't starve the other bots on the server. Adjust `MemoryMax` and `CPUQuota` in `deploy/macaw.service` if needed.
 
