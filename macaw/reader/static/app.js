@@ -745,11 +745,148 @@ viewport.addEventListener('click', e => {
     return;
   }
   if (getSelection().toString()) return;
+  if (lookUp(e.clientX, e.clientY)) return;
   const x = e.clientX / innerWidth;
   if (!prefs.scroll && x < .28) turn(-1);
   else if (!prefs.scroll && x > .72) turn(1);
   else toggleChrome();
 });
+
+/* ---------- tap a word: what it means here ---------- */
+
+const WORD_CH = /[\p{L}\p{M}\p{N}'’\-]/u;
+const BLOCKS = 'p,li,blockquote,h1,h2,h3,h4,h5,h6,td,th,dd,dt,figcaption,pre';
+const explained = new Map(); // "book|word|sentence" -> explanation
+
+function caretAt(x, y) {
+  if (document.caretRangeFromPoint) return document.caretRangeFromPoint(x, y);
+  const p = document.caretPositionFromPoint && document.caretPositionFromPoint(x, y);
+  if (!p) return null;
+  const r = document.createRange();
+  r.setStart(p.offsetNode, p.offset);
+  return r;
+}
+
+// The word under a tap, or null when the tap is on blank space.
+function wordAt(x, y) {
+  const c = caretAt(x, y);
+  if (!c || c.startContainer.nodeType !== 3 || !flow.contains(c.startContainer)) return null;
+  const node = c.startContainer;
+  const t = node.data;
+  let a = c.startOffset, b = c.startOffset;
+  while (a > 0 && WORD_CH.test(t[a - 1])) a--;
+  while (b < t.length && WORD_CH.test(t[b])) b++;
+  while (a < b && /['’\-]/.test(t[a])) a++;
+  while (b > a && /['’\-]/.test(t[b - 1])) b--;
+  if (a === b || !/\p{L}/u.test(t.slice(a, b))) return null;
+  const range = document.createRange();
+  range.setStart(node, a);
+  range.setEnd(node, b);
+  const hit = [...range.getClientRects()].some(r => x >= r.left - 4 && x <= r.right + 4 && y >= r.top - 4 && y <= r.bottom + 4);
+  return hit ? { range, word: t.slice(a, b), node } : null;
+}
+
+const squash = s => s.replace(/\s+/g, ' ').trim();
+
+// The sentence the word is in, and the text around it for context.
+function sentenceOf(w) {
+  const block = (w.node.parentElement && w.node.parentElement.closest(BLOCKS)) || w.node.parentElement;
+  const text = block.textContent;
+  const before = document.createRange();
+  before.setStart(block, 0);
+  before.setEnd(w.range.startContainer, w.range.startOffset);
+  const at = before.toString().length;
+  let sentence = '';
+  try {
+    for (const seg of new Intl.Segmenter(R.book.language || undefined, { granularity: 'sentence' }).segment(text)) {
+      if (at >= seg.index && at < seg.index + seg.segment.length) { sentence = seg.segment; break; }
+    }
+  } catch (e) { /* no Intl.Segmenter, or an odd language tag: the plain way below */ }
+  if (!sentence) {
+    const start = Math.max(0, ...['. ', '! ', '? ', '… '].map(m => text.lastIndexOf(m, at) + 1));
+    const ends = ['.', '!', '?', '…'].map(m => text.indexOf(m, at)).filter(i => i >= 0);
+    sentence = text.slice(start, ends.length ? Math.min(...ends) + 1 : text.length);
+  }
+  sentence = squash(sentence);
+  if (sentence.length > 500) {
+    const i = Math.max(0, sentence.indexOf(w.word) - 250);
+    sentence = '…' + sentence.slice(i, i + 500) + '…';
+  }
+  let context = squash(text);
+  const prev = block.previousElementSibling;
+  if (prev && prev.matches(BLOCKS)) context = squash(prev.textContent).slice(-400) + '\n' + context;
+  return { sentence, context: context.slice(0, 1400) };
+}
+
+function lookUp(x, y) {
+  const w = wordAt(x, y);
+  if (!w) return false;
+  const { sentence, context } = sentenceOf(w);
+  const hl = window.CSS && CSS.highlights && window.Highlight;
+  if (hl) CSS.highlights.set('look', new Highlight(w.range));
+  haptic('light');
+
+  const el = document.createElement('div');
+  el.className = 'look ' + (R.dark ? 'dark' : 'light');
+  el.innerHTML = `<div class="look-head"><b>${esc(w.word)}</b></div>
+    <div class="look-text"><span class="look-wait"><i></i><i></i><i></i></span></div>
+    <button class="look-add">${icon('plus')}<span>Add to Deck</span></button>`;
+  // Next to the word, on the side with more room, never over it.
+  const r = w.range.getBoundingClientRect();
+  const width = Math.min(360, innerWidth - 24);
+  el.style.width = width + 'px';
+  el.style.left = clamp(r.left + r.width / 2 - width / 2, 12, innerWidth - width - 12) + 'px';
+  const roomBelow = innerHeight - r.bottom, roomAbove = r.top;
+  if (roomBelow >= roomAbove) {
+    el.style.top = (r.bottom + 10) + 'px';
+    el.style.maxHeight = (roomBelow - 24) + 'px';
+    el.style.transformOrigin = 'top center';
+  } else {
+    el.style.bottom = (innerHeight - r.top + 10) + 'px';
+    el.style.maxHeight = (roomAbove - 24 - 20) + 'px';
+    el.style.transformOrigin = 'bottom center';
+  }
+  const entry = layer(el, { clear: true, onClose: () => { if (hl) CSS.highlights.delete('look'); } });
+  const out = $('.look-text', el);
+  const add = $('.look-add', el);
+  const key = `${R.id}|${w.word.toLowerCase()}|${sentence}`;
+  let meaning = '';
+
+  const show = text => {
+    meaning = text;
+    // The explanation opens with the word's dictionary form and part of speech: that becomes the title.
+    const lines = text.split('\n');
+    if (lines.length > 1 && lines[0].length <= 60) {
+      $('.look-head b', el).textContent = lines[0].replace(/^[*#\s]+|[*\s]+$/g, '');
+      out.textContent = lines.slice(1).join('\n').trim();
+    } else {
+      out.textContent = text;
+    }
+  };
+  const ask = () => {
+    if (explained.has(key)) { show(explained.get(key)); return; }
+    api(`books/${R.id}/explain`, { method: 'POST', json: { word: w.word, sentence, context } })
+      .then(j => { explained.set(key, j.text); show(j.text); })
+      .catch(err => {
+        out.innerHTML = `<span class="look-err">${esc(err.message)}</span> <button class="look-retry">Try Again</button>`;
+        $('.look-retry', out).onclick = ev => { ev.stopPropagation(); out.innerHTML = '<span class="look-wait"><i></i><i></i><i></i></span>'; ask(); };
+      });
+  };
+  ask();
+
+  add.onclick = () => {
+    add.disabled = true;
+    api(`books/${R.id}/add-word`, { method: 'POST', json: { word: w.word, sentence, meaning } })
+      .then(() => {
+        add.classList.add('done');
+        add.innerHTML = `${icon('check')}<span>Sent to the Bot</span>`;
+        haptic('medium');
+        toast('The bot will send the card preview in your chat', 3200);
+      })
+      .catch(err => { add.disabled = false; toast(err.message); });
+  };
+  return entry;
+}
 
 let lastScroll = 0;
 viewport.addEventListener('scroll', () => {

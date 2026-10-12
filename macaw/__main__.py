@@ -64,7 +64,8 @@ async def main() -> None:
         with contextlib.suppress(Exception):
             await bot.set_my_commands(owner_commands, scope=BotCommandScopeChat(chat_id=owner))
     web = await reader.start(
-        reader.ReaderServer(config.bot_token, app._allowed, app.library, store),
+        reader.ReaderServer(config.bot_token, app._allowed, app.library, store,
+                            explain=app.explain_word, add_word=app.add_book_word),
         "127.0.0.1",
         config.reader_port,
     )

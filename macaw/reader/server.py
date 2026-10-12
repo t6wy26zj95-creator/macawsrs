@@ -27,11 +27,13 @@ from aiohttp import web
 
 from .. import books
 from ..db import Store, iso, utcnow
+from ..llm import LLMError
 
 log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
 TOKEN_DAYS = 30
+WORD_MAX, SENTENCE_MAX, CONTEXT_MAX = 80, 600, 1500
 PREF_KEYS = {"theme", "size", "font", "spacing", "margins", "justify", "bold", "scroll", "sort", "view"}
 
 
@@ -115,11 +117,16 @@ def read_token(bot_token: str, token: str, now: float | None = None) -> int | No
 # ---------------- the web app ----------------
 
 class ReaderServer:
-    def __init__(self, bot_token: str, allowed, library: Library, store: Store):
+    def __init__(self, bot_token: str, allowed, library: Library, store: Store, explain=None, add_word=None):
         self.bot_token = bot_token
         self.allowed = allowed  # callable: user id -> bool
         self.library = library
         self.store = store
+        # Tap a word in the book: explain(uid, word, sentence, context, book) -> text (async), and
+        # add_word(uid, word, sentence, meaning, book), which hands it to the bot to make a card.
+        self.explain = explain
+        self.add_word = add_word
+        self._explained: dict[tuple, str] = {}
 
     def build(self) -> web.Application:
         app = web.Application(client_max_size=books.MAX_SIZE + 1024 * 1024, middlewares=[self._headers])
@@ -137,6 +144,8 @@ class ReaderServer:
         r.add_get("/api/books/{id:\\d+}/res/{name}", self.resource)
         r.add_get("/api/prefs", self.get_prefs)
         r.add_put("/api/prefs", self.put_prefs)
+        r.add_post("/api/books/{id:\\d+}/explain", self.explain_word)
+        r.add_post("/api/books/{id:\\d+}/add-word", self.add_to_deck)
         return app
 
     @web.middleware
@@ -282,6 +291,46 @@ class ReaderServer:
         prefs = {k: v for k, v in body.items() if k in PREF_KEYS and isinstance(v, (str, int, float, bool))}
         self.store.set_reader_prefs(uid, prefs)
         return web.json_response(prefs)
+
+    async def _word(self, request: web.Request) -> tuple[int, Any, dict[str, str]]:
+        uid = self._user(request)
+        row = self._book(request, uid)
+        body = await request.json()
+        word = " ".join(str(body.get("word") or "").split())[:WORD_MAX]
+        sentence = " ".join(str(body.get("sentence") or "").split())[:SENTENCE_MAX]
+        if not word:
+            raise web.HTTPBadRequest(text="No word.")
+        return uid, row, {"word": word, "sentence": sentence or word,
+                          "context": " ".join(str(body.get("context") or "").split())[:CONTEXT_MAX],
+                          "meaning": str(body.get("meaning") or "").strip()[:1500]}
+
+    async def explain_word(self, request: web.Request) -> web.Response:
+        uid, row, w = await self._word(request)
+        if not self.explain:
+            return web.json_response({"error": "Explanations aren't switched on."}, status=503)
+        key = (uid, row["id"], w["word"].lower(), w["sentence"])
+        text = self._explained.get(key)
+        if text is None:
+            try:
+                text = await self.explain(uid, w["word"], w["sentence"], w["context"], row["title"])
+            except LLMError as e:
+                log.warning("explaining a word failed: %s", e)
+                return web.json_response({"error": "Couldn't get an explanation right now. Try again in a bit."},
+                                         status=503)
+            except Exception:
+                log.exception("explaining a word failed")
+                return web.json_response({"error": "Something went wrong. Try again."}, status=500)
+            if len(self._explained) >= 300:
+                self._explained.pop(next(iter(self._explained)))
+            self._explained[key] = text
+        return web.json_response({"text": text})
+
+    async def add_to_deck(self, request: web.Request) -> web.Response:
+        uid, row, w = await self._word(request)
+        if not self.add_word:
+            return web.json_response({"error": "Adding words isn't switched on."}, status=503)
+        self.add_word(uid, w["word"], w["sentence"], w["meaning"], row["title"])
+        return web.json_response({"ok": True})
 
 
 async def start(server: ReaderServer, host: str, port: int) -> web.AppRunner | None:

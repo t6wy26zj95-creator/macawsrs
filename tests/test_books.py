@@ -173,3 +173,86 @@ async def test_tunnel_url():
     finally:
         await srv.close()
     assert await tunnel_url(f"127.0.0.1:{srv.port}") is None  # nothing listening any more
+
+
+async def test_tap_a_word_explain_and_add(store, tmp_path):
+    lib = reader.Library(store, tmp_path)
+    calls = {"explain": [], "add": []}
+
+    async def explain(uid, word, sentence, context, book):
+        calls["explain"].append((uid, word, sentence, context, book))
+        if word == "broken":
+            from macaw.llm import LLMError
+            raise LLMError("limit hit")
+        return "deep (adjective)\nNot shallow."
+
+    srv = reader.ReaderServer(BOT_TOKEN, lambda uid: uid in (42, 7), lib, store, explain=explain,
+                              add_word=lambda *a: calls["add"].append(a))
+    client = TestClient(TestServer(srv.build()))
+    await client.start_server()
+    try:
+        h = await session(client)
+        b = lib.add(42, make_epub(), "river.epub")
+        word = {"word": " deep ", "sentence": "They swam in the\n deep pool.", "context": "It was hot. They swam in the deep pool."}
+        r = await client.post(f"/api/books/{b['id']}/explain", headers=h, json=word)
+        assert await r.json() == {"text": "deep (adjective)\nNot shallow."}
+        assert calls["explain"] == [(42, "deep", "They swam in the deep pool.", "It was hot. They swam in the deep pool.",
+                                     "The Quiet River")]
+        await client.post(f"/api/books/{b['id']}/explain", headers=h, json=word)
+        assert len(calls["explain"]) == 1  # the same word in the same sentence is asked once
+
+        r = await client.post(f"/api/books/{b['id']}/explain", headers=h, json={"word": "broken", "sentence": "x"})
+        assert r.status == 503 and "Try again" in (await r.json())["error"]
+        assert (await client.post(f"/api/books/{b['id']}/explain", headers=h, json={"word": " "})).status == 400
+
+        r = await client.post(f"/api/books/{b['id']}/add-word", headers=h,
+                              json={"word": "deep", "sentence": "They swam in the deep pool.", "meaning": "Not shallow."})
+        assert await r.json() == {"ok": True}
+        assert calls["add"] == [(42, "deep", "They swam in the deep pool.", "Not shallow.", "The Quiet River")]
+
+        # Only the owner of the book, and only with a session.
+        h7 = await session(client, 7)
+        assert (await client.post(f"/api/books/{b['id']}/add-word", headers=h7, json={"word": "deep"})).status == 404
+        assert (await client.post(f"/api/books/{b['id']}/explain", json={"word": "deep"})).status == 401
+    finally:
+        await client.close()
+
+
+async def test_explain_word_and_add_book_word(store):
+    import asyncio
+
+    from macaw.agent import Agent
+    from macaw.bot.app import App
+    from macaw.config import Config
+    from tests.conftest import UID, FakeLLM
+
+    llm = FakeLLM()
+    seen = {}
+
+    async def reply(prompt, tools):
+        seen["prompt"] = prompt
+        return "deep (adjective) 🙂\nNot shallow."
+
+    llm.script.append(reply)
+    agent = Agent(store, llm)
+    text = await agent.explain_word(UID, "deep", "They swam in the deep pool.", "It was hot. They swam in the deep pool.", "River")
+    assert text == "deep (adjective)\nNot shallow."
+    assert "Word tapped: deep" in seen["prompt"] and "Book: River" in seen["prompt"] and "It was hot." in seen["prompt"]
+
+    app = App(Config("t", frozenset({UID}), None, "UTC", "fake", None, "INFO"), store, agent, None)
+    ran = []
+
+    async def run_llm(uid, chat_id, factory, notify):
+        ran.append((uid, chat_id, notify))
+        await factory()
+
+    async def on_user_message(uid, text, now=None):
+        ran.append(text)
+        return []
+
+    app.run_llm = run_llm
+    agent.on_user_message = on_user_message
+    app.add_book_word(UID, "deep", "They swam in the deep pool.", "Not shallow.", "River")
+    await asyncio.gather(*app._background)
+    assert ran[0] == (UID, UID, True)
+    assert '"deep"' in ran[1] and "River" in ran[1] and "They swam in the deep pool." in ran[1] and "Not shallow." in ran[1]
