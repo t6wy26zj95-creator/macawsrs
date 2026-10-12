@@ -28,12 +28,14 @@ from aiohttp import web
 from .. import books
 from ..db import Store, iso, utcnow
 from ..llm import LLMError
+from . import pictures
 
 log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
 TOKEN_DAYS = 30
-WORD_MAX, SENTENCE_MAX, CONTEXT_MAX = 80, 600, 1500
+WORD_MAX, SENTENCE_MAX, CONTEXT_MAX = 200, 600, 1500
+QUESTION_MAX, HISTORY_MAX = 500, 6
 PREF_KEYS = {"theme", "size", "font", "spacing", "margins", "justify", "bold", "scroll", "sort", "view"}
 
 
@@ -117,16 +119,20 @@ def read_token(bot_token: str, token: str, now: float | None = None) -> int | No
 # ---------------- the web app ----------------
 
 class ReaderServer:
-    def __init__(self, bot_token: str, allowed, library: Library, store: Store, explain=None, add_word=None):
+    def __init__(self, bot_token: str, allowed, library: Library, store: Store, explain=None, add_word=None, ask=None,
+                 find_pictures=pictures.find):
         self.bot_token = bot_token
         self.allowed = allowed  # callable: user id -> bool
         self.library = library
         self.store = store
-        # Tap a word in the book: explain(uid, word, sentence, context, book) -> text (async), and
+        # Tap a word in the book: explain(uid, word, sentence, context, book) -> {text, picture} (async), and
         # add_word(uid, word, sentence, meaning, book), which hands it to the bot to make a card.
         self.explain = explain
         self.add_word = add_word
-        self._explained: dict[tuple, str] = {}
+        self.ask = ask  # ask(uid, word, sentence, context, book, explanation, history, question) -> text
+        self.find_pictures = find_pictures
+        self._explained: dict[tuple, dict] = {}
+        self._pictures: dict[str, list] = {}
 
     def build(self) -> web.Application:
         app = web.Application(client_max_size=books.MAX_SIZE + 1024 * 1024, middlewares=[self._headers])
@@ -146,6 +152,8 @@ class ReaderServer:
         r.add_put("/api/prefs", self.put_prefs)
         r.add_post("/api/books/{id:\\d+}/explain", self.explain_word)
         r.add_post("/api/books/{id:\\d+}/add-word", self.add_to_deck)
+        r.add_post("/api/books/{id:\\d+}/ask", self.ask_about)
+        r.add_get("/api/pictures", self.pictures)
         return app
 
     @web.middleware
@@ -304,26 +312,69 @@ class ReaderServer:
                           "context": " ".join(str(body.get("context") or "").split())[:CONTEXT_MAX],
                           "meaning": str(body.get("meaning") or "").strip()[:1500]}
 
+    async def _llm(self, call) -> web.Response:
+        try:
+            return web.json_response(await call())
+        except LLMError as e:
+            log.warning("reader AI call failed: %s", e)
+            return web.json_response({"error": "Couldn't get an answer right now. Try again in a bit."}, status=503)
+        except Exception:
+            log.exception("reader AI call failed")
+            return web.json_response({"error": "Something went wrong. Try again."}, status=500)
+
     async def explain_word(self, request: web.Request) -> web.Response:
         uid, row, w = await self._word(request)
         if not self.explain:
             return web.json_response({"error": "Explanations aren't switched on."}, status=503)
         key = (uid, row["id"], w["word"].lower(), w["sentence"])
-        text = self._explained.get(key)
-        if text is None:
-            try:
-                text = await self.explain(uid, w["word"], w["sentence"], w["context"], row["title"])
-            except LLMError as e:
-                log.warning("explaining a word failed: %s", e)
-                return web.json_response({"error": "Couldn't get an explanation right now. Try again in a bit."},
-                                         status=503)
-            except Exception:
-                log.exception("explaining a word failed")
-                return web.json_response({"error": "Something went wrong. Try again."}, status=500)
-            if len(self._explained) >= 300:
-                self._explained.pop(next(iter(self._explained)))
-            self._explained[key] = text
-        return web.json_response({"text": text})
+
+        async def call():
+            if key not in self._explained:
+                out = await self.explain(uid, w["word"], w["sentence"], w["context"], row["title"])
+                if len(self._explained) >= 300:
+                    self._explained.pop(next(iter(self._explained)))
+                self._explained[key] = out
+            return self._explained[key]
+
+        return await self._llm(call)
+
+    async def ask_about(self, request: web.Request) -> web.Response:
+        uid, row, w = await self._word(request)
+        body = await request.json()
+        question = str(body.get("question") or "").strip()[:QUESTION_MAX]
+        if not question:
+            raise web.HTTPBadRequest(text="No question.")
+        if not self.ask:
+            return web.json_response({"error": "Questions aren't switched on."}, status=503)
+        history = [
+            (str(h.get("q", ""))[:QUESTION_MAX], str(h.get("a", ""))[:2000])
+            for h in (body.get("history") or [])[-HISTORY_MAX:] if isinstance(h, dict)
+        ]
+        explanation = str(body.get("explanation") or "")[:2000]
+
+        async def call():
+            text = await self.ask(uid, w["word"], w["sentence"], w["context"], row["title"],
+                                  explanation, history, question)
+            return {"text": text}
+
+        return await self._llm(call)
+
+    async def pictures(self, request: web.Request) -> web.Response:
+        self._user(request)
+        q = " ".join(request.query.get("q", "").split())[:60]
+        if not q:
+            return web.json_response([])
+        key = q.lower()
+        found = self._pictures.get(key)
+        if found is None:
+            found = await self.find_pictures(q)
+            if found:  # nothing found may just be the network; ask again next time
+                if len(self._pictures) >= 300:
+                    self._pictures.pop(next(iter(self._pictures)))
+                self._pictures[key] = found
+        resp = web.json_response(found)
+        resp.headers["Cache-Control"] = "private, max-age=86400"
+        return resp
 
     async def add_to_deck(self, request: web.Request) -> web.Response:
         uid, row, w = await self._word(request)

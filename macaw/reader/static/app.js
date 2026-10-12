@@ -81,12 +81,33 @@ async function api(path, opts = {}) {
   return res.status === 204 ? null : res.json();
 }
 
+const LINK_KEY = 'reader-token';
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { if (v) localStorage.setItem(k, v); else localStorage.removeItem(k); } catch (e) { /* private mode */ } },
+};
+
 async function login() {
   const initData = tg && tg.initData;
-  if (!initData) throw new Error('Open the library from the bot in Telegram.');
-  const res = await fetch('api/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData }) });
-  if (!res.ok) throw new Error((await res.text()) || 'Open the library from the bot in Telegram.');
-  token = (await res.json()).token;
+  if (initData) {
+    const res = await fetch('api/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData }) });
+    if (!res.ok) throw new Error((await res.text()) || 'Open the library from the bot in Telegram.');
+    token = (await res.json()).token;
+    return;
+  }
+  // In Safari or another browser: the personal link from /books carries the sign-in after #t=.
+  const m = location.hash.match(/[#&]t=([^&]+)/);
+  if (m) {
+    store.set(LINK_KEY, decodeURIComponent(m[1]));
+    history.replaceState(null, '', location.pathname + location.search);
+  }
+  token = store.get(LINK_KEY) || '';
+  if (!token) throw new Error('Open the library from the bot in Telegram, or send /books to the bot and tap "Open in browser".');
+  const res = await fetch('api/books', { headers: { Authorization: 'Bearer ' + token } });
+  if (res.status === 401) {
+    store.set(LINK_KEY, null);
+    throw new Error('This link has expired. Send /books to the bot and tap "Open in browser" again.');
+  }
 }
 
 let prefsTimer = 0;
@@ -710,7 +731,7 @@ viewport.addEventListener('touchstart', e => {
 }, { passive: true });
 
 viewport.addEventListener('touchmove', e => {
-  if (!touch.active || prefs.scroll) return;
+  if (!touch.active || prefs.scroll || !getSelection().isCollapsed) return;
   const dx = e.touches[0].clientX - touch.x;
   const dy = e.touches[0].clientY - touch.y;
   if (touch.horizontal === null && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) touch.horizontal = Math.abs(dx) > Math.abs(dy);
@@ -752,11 +773,13 @@ viewport.addEventListener('click', e => {
   else toggleChrome();
 });
 
-/* ---------- tap a word: what it means here ---------- */
+/* ---------- tap a word (or hold and stretch a phrase): what it means here ---------- */
 
 const WORD_CH = /[\p{L}\p{M}\p{N}'’\-]/u;
 const BLOCKS = 'p,li,blockquote,h1,h2,h3,h4,h5,h6,td,th,dd,dt,figcaption,pre';
-const explained = new Map(); // "book|word|sentence" -> explanation
+const PHRASE_MAX = 200;
+const explained = new Map(); // "book|word|sentence" -> {text, picture}
+let card = null; // the open word card
 
 function caretAt(x, y) {
   if (document.caretRangeFromPoint) return document.caretRangeFromPoint(x, y);
@@ -783,34 +806,36 @@ function wordAt(x, y) {
   range.setStart(node, a);
   range.setEnd(node, b);
   const hit = [...range.getClientRects()].some(r => x >= r.left - 4 && x <= r.right + 4 && y >= r.top - 4 && y <= r.bottom + 4);
-  return hit ? { range, word: t.slice(a, b), node } : null;
+  return hit ? { range, word: t.slice(a, b) } : null;
 }
 
 const squash = s => s.replace(/\s+/g, ' ').trim();
 
-// The sentence the word is in, and the text around it for context.
+// The sentence (or sentences) the word or phrase is in, and the text around it for context.
 function sentenceOf(w) {
-  const block = (w.node.parentElement && w.node.parentElement.closest(BLOCKS)) || w.node.parentElement;
+  const start = w.range.startContainer;
+  const el0 = start.nodeType === 3 ? start.parentElement : start;
+  const block = el0.closest(BLOCKS) || el0;
   const text = block.textContent;
   const before = document.createRange();
   before.setStart(block, 0);
   before.setEnd(w.range.startContainer, w.range.startOffset);
   const at = before.toString().length;
+  const end = at + Math.max(1, w.range.toString().length);
   let sentence = '';
   try {
-    for (const seg of new Intl.Segmenter(R.book.language || undefined, { granularity: 'sentence' }).segment(text)) {
-      if (at >= seg.index && at < seg.index + seg.segment.length) { sentence = seg.segment; break; }
-    }
+    const segs = [...new Intl.Segmenter(R.book.language || undefined, { granularity: 'sentence' }).segment(text)];
+    sentence = segs.filter(g => g.index < end && g.index + g.segment.length > at).map(g => g.segment).join('');
   } catch (e) { /* no Intl.Segmenter, or an odd language tag: the plain way below */ }
   if (!sentence) {
-    const start = Math.max(0, ...['. ', '! ', '? ', '… '].map(m => text.lastIndexOf(m, at) + 1));
-    const ends = ['.', '!', '?', '…'].map(m => text.indexOf(m, at)).filter(i => i >= 0);
-    sentence = text.slice(start, ends.length ? Math.min(...ends) + 1 : text.length);
+    const from = Math.max(0, ...['. ', '! ', '? ', '… '].map(m => text.lastIndexOf(m, at) + 1));
+    const ends = ['.', '!', '?', '…'].map(m => text.indexOf(m, end - 1)).filter(i => i >= 0);
+    sentence = text.slice(from, ends.length ? Math.min(...ends) + 1 : text.length);
   }
   sentence = squash(sentence);
-  if (sentence.length > 500) {
-    const i = Math.max(0, sentence.indexOf(w.word) - 250);
-    sentence = '…' + sentence.slice(i, i + 500) + '…';
+  if (sentence.length > 560) {
+    const i = Math.max(0, sentence.indexOf(squash(w.word)) - 250);
+    sentence = '…' + sentence.slice(i, i + 540) + '…';
   }
   let context = squash(text);
   const prev = block.previousElementSibling;
@@ -821,62 +846,152 @@ function sentenceOf(w) {
 function lookUp(x, y) {
   const w = wordAt(x, y);
   if (!w) return false;
+  openCard(w, false);
+  return true;
+}
+
+const WAIT = '<span class="look-wait"><i></i><i></i><i></i></span>';
+
+function openLink(url) {
+  try { tg.openLink(url); } catch (e) { window.open(url, '_blank', 'noopener'); }
+}
+
+// The card next to the word: the meaning, real photos, Ask, and Add to Deck.
+// fromSelection: opened by holding and stretching a selection; it then has no scrim (the handles stay
+// usable) and goes away when the selection does, until the card itself is touched.
+function openCard(w, fromSelection) {
+  if (card) card.close();
+  const word = squash(w.word).slice(0, PHRASE_MAX);
   const { sentence, context } = sentenceOf(w);
-  const hl = window.CSS && CSS.highlights && window.Highlight;
+  const hl = !fromSelection && window.CSS && CSS.highlights && window.Highlight;
   if (hl) CSS.highlights.set('look', new Highlight(w.range));
   haptic('light');
 
   const el = document.createElement('div');
   el.className = 'look ' + (R.dark ? 'dark' : 'light');
-  el.innerHTML = `<div class="look-head"><b>${esc(w.word)}</b></div>
-    <div class="look-text"><span class="look-wait"><i></i><i></i><i></i></span></div>
-    <button class="look-add">${icon('plus')}<span>Add to Deck</span></button>`;
-  // Next to the word, on the side with more room, never over it.
+  el.innerHTML = `<div class="look-head"><b>${esc(word)}</b></div>
+    <div class="look-text">${WAIT}</div>
+    <div class="look-pics" hidden></div>
+    <div class="look-qa"></div>
+    <form class="look-ask" hidden><input type="text" enterkeyhint="send" placeholder="Ask anything about it" maxlength="500"><button type="submit" aria-label="Send">${icon('send')}</button></form>
+    <div class="look-acts"><button type="button" class="look-btn look-askbtn">${icon('ask')}<span>Ask</span></button><button type="button" class="look-btn look-add">${icon('plus')}<span>Add to Deck</span></button></div>`;
   const r = w.range.getBoundingClientRect();
-  const width = Math.min(360, innerWidth - 24);
+  const width = Math.min(380, innerWidth - 24);
   el.style.width = width + 'px';
   el.style.left = clamp(r.left + r.width / 2 - width / 2, 12, innerWidth - width - 12) + 'px';
-  const roomBelow = innerHeight - r.bottom, roomAbove = r.top;
-  if (roomBelow >= roomAbove) {
-    el.style.top = (r.bottom + 10) + 'px';
-    el.style.maxHeight = (roomBelow - 24) + 'px';
-    el.style.transformOrigin = 'top center';
-  } else {
-    el.style.bottom = (innerHeight - r.top + 10) + 'px';
-    el.style.maxHeight = (roomAbove - 24 - 20) + 'px';
-    el.style.transformOrigin = 'bottom center';
-  }
-  const entry = layer(el, { clear: true, onClose: () => { if (hl) CSS.highlights.delete('look'); } });
-  const out = $('.look-text', el);
-  const add = $('.look-add', el);
-  const key = `${R.id}|${w.word.toLowerCase()}|${sentence}`;
-  let meaning = '';
+  const place = () => {
+    // Next to the word, on the side with more room, never over it. While typing a question it moves to the
+    // top, clear of the keyboard.
+    el.style.top = el.style.bottom = '';
+    if (el.classList.contains('asking')) {
+      el.style.top = 'calc(var(--safe-top) + 10px)';
+      el.style.maxHeight = '46vh';
+      return;
+    }
+    const roomBelow = innerHeight - r.bottom, roomAbove = r.top;
+    if (roomBelow >= roomAbove || (fromSelection && roomBelow > 260)) {
+      el.style.top = (r.bottom + (fromSelection ? 30 : 10)) + 'px';
+      el.style.maxHeight = (roomBelow - 24 - (fromSelection ? 20 : 0)) + 'px';
+      el.style.transformOrigin = 'top center';
+    } else {
+      el.style.bottom = (innerHeight - r.top + (fromSelection ? 50 : 10)) + 'px';
+      el.style.maxHeight = (roomAbove - 44 - (fromSelection ? 40 : 0)) + 'px';
+      el.style.transformOrigin = 'bottom center';
+    }
+  };
+  place();
 
-  const show = text => {
-    meaning = text;
-    // The explanation opens with the word's dictionary form and part of speech: that becomes the title.
-    const lines = text.split('\n');
-    if (lines.length > 1 && lines[0].length <= 60) {
+  const state = { word, explanation: '', history: [], pinned: !fromSelection, fromSelection };
+  const entry = layer(el, {
+    scrim: !fromSelection, clear: true,
+    onClose: () => {
+      if (hl) CSS.highlights.delete('look');
+      if (card && card.el === el) card = null;
+      document.removeEventListener('pointerdown', outside, true);
+    },
+  });
+  card = { el, state, close: () => entry.close() };
+  // A selection card stays put once touched, and then closes on a tap anywhere else.
+  const outside = e => { if (state.pinned && !el.contains(e.target)) entry.close(); };
+  if (fromSelection) {
+    el.addEventListener('pointerdown', () => { state.pinned = true; }, true);
+    el.addEventListener('touchstart', () => { state.pinned = true; }, { capture: true, passive: true });
+    setTimeout(() => document.addEventListener('pointerdown', outside, true), 0);
+  }
+
+  const out = $('.look-text', el);
+  const pics = $('.look-pics', el);
+  const qa = $('.look-qa', el);
+  const askForm = $('.look-ask', el);
+  const input = $('input', askForm);
+  const add = $('.look-add', el);
+  const key = `${R.id}|${word.toLowerCase()}|${sentence}`;
+  const body = () => ({ word, sentence, context });
+
+  const showPictures = q => {
+    if (!q) return;
+    api('pictures?q=' + encodeURIComponent(q)).then(list => {
+      if (!list.length || !el.isConnected) return;
+      pics.innerHTML = list.map((p, i) => `<button type="button" data-i="${i}" aria-label="${esc(p.title)}"><img src="${esc(p.src)}" alt="${esc(p.title)}" loading="lazy" referrerpolicy="no-referrer"></button>`).join('')
+        + '<small>Photos: Wikimedia Commons</small>';
+      pics.hidden = false;
+      $$('img', pics).forEach(img => { img.onerror = () => img.parentElement.remove(); });
+      pics.onclick = e => { const b = e.target.closest('button[data-i]'); if (b && list[+b.dataset.i].page) openLink(list[+b.dataset.i].page); };
+    }).catch(() => {});
+  };
+  const show = res => {
+    state.explanation = res.text;
+    // The explanation opens with the dictionary form and part of speech: that becomes the title.
+    const lines = res.text.split('\n');
+    if (lines.length > 1 && lines[0].length <= 80) {
       $('.look-head b', el).textContent = lines[0].replace(/^[*#\s]+|[*\s]+$/g, '');
       out.textContent = lines.slice(1).join('\n').trim();
     } else {
-      out.textContent = text;
+      out.textContent = res.text;
     }
+    showPictures(res.picture);
   };
-  const ask = () => {
+  const explain = () => {
     if (explained.has(key)) { show(explained.get(key)); return; }
-    api(`books/${R.id}/explain`, { method: 'POST', json: { word: w.word, sentence, context } })
-      .then(j => { explained.set(key, j.text); show(j.text); })
+    api(`books/${R.id}/explain`, { method: 'POST', json: body() })
+      .then(res => { explained.set(key, res); if (el.isConnected) show(res); })
       .catch(err => {
-        out.innerHTML = `<span class="look-err">${esc(err.message)}</span> <button class="look-retry">Try Again</button>`;
-        $('.look-retry', out).onclick = ev => { ev.stopPropagation(); out.innerHTML = '<span class="look-wait"><i></i><i></i><i></i></span>'; ask(); };
+        out.innerHTML = `<span class="look-err">${esc(err.message)}</span> <button type="button" class="look-retry">Try Again</button>`;
+        $('.look-retry', out).onclick = () => { out.innerHTML = WAIT; explain(); };
       });
   };
-  ask();
+  explain();
+
+  $('.look-askbtn', el).onclick = () => {
+    askForm.hidden = false;
+    $('.look-askbtn', el).hidden = true;
+    el.classList.add('asking');
+    place();
+    input.focus();
+  };
+  askForm.onsubmit = e => {
+    e.preventDefault();
+    const question = input.value.trim();
+    if (!question) return;
+    input.value = '';
+    const item = document.createElement('div');
+    item.className = 'look-turn';
+    item.innerHTML = `<p class="look-q">${esc(question)}</p><p class="look-a">${WAIT}</p>`;
+    qa.appendChild(item);
+    el.scrollTop = el.scrollHeight;
+    const a = $('.look-a', item);
+    api(`books/${R.id}/ask`, { method: 'POST', json: { ...body(), explanation: state.explanation, history: state.history, question } })
+      .then(res => {
+        state.history.push({ q: question, a: res.text });
+        a.textContent = res.text;
+        el.scrollTop = el.scrollHeight;
+      })
+      .catch(err => { a.innerHTML = `<span class="look-err">${esc(err.message)}</span>`; });
+  };
 
   add.onclick = () => {
     add.disabled = true;
-    api(`books/${R.id}/add-word`, { method: 'POST', json: { word: w.word, sentence, meaning } })
+    api(`books/${R.id}/add-word`, { method: 'POST', json: { word, sentence, meaning: state.explanation } })
       .then(() => {
         add.classList.add('done');
         add.innerHTML = `${icon('check')}<span>Sent to the Bot</span>`;
@@ -885,8 +1000,40 @@ function lookUp(x, y) {
       })
       .catch(err => { add.disabled = false; toast(err.message); });
   };
-  return entry;
+  return card;
 }
+
+// A selection that starts or ends inside a word takes in the whole word.
+function snapToWords(range) {
+  const { startContainer: a, endContainer: b } = range;
+  let i = range.startOffset, j = range.endOffset;
+  if (a.nodeType === 3) { while (i > 0 && WORD_CH.test(a.data[i - 1])) i--; range.setStart(a, i); }
+  if (b.nodeType === 3) { while (j < b.data.length && WORD_CH.test(b.data[j])) j++; range.setEnd(b, j); }
+  return range;
+}
+
+// Hold a word, stretch the selection over a phrase, let go: the card explains the whole phrase.
+let selTimer = 0;
+document.addEventListener('selectionchange', () => {
+  clearTimeout(selTimer);
+  if (!R.open || !R.book) return;
+  const sel = getSelection();
+  const inBook = sel.rangeCount && !sel.isCollapsed && flow.contains(sel.getRangeAt(0).commonAncestorContainer);
+  if (!inBook) {
+    if (card && card.state.fromSelection && !card.state.pinned) card.close();
+    return;
+  }
+  selTimer = setTimeout(() => {
+    const s = getSelection();
+    if (!s.rangeCount || s.isCollapsed) return;
+    const range = snapToWords(s.getRangeAt(0).cloneRange());
+    const phrase = squash(range.toString());
+    if (!/\p{L}/u.test(phrase) || !flow.contains(range.commonAncestorContainer)) return;
+    if (card && card.state.word === phrase.slice(0, PHRASE_MAX)) return;
+    if (card && !card.state.fromSelection) return; // a tapped word's card is open: leave it be
+    openCard({ range, word: phrase }, true);
+  }, 650);
+});
 
 let lastScroll = 0;
 viewport.addEventListener('scroll', () => {

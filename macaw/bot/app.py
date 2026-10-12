@@ -26,7 +26,7 @@ from ..config import Config
 from ..db import Store, iso, parse
 from ..llm import CLAUDE, FREE, LLMError
 from ..prompts import GREETING
-from ..reader.server import Library
+from ..reader.server import Library, make_token
 from ..reader.tunnel import tunnel_url
 from ..voice import Transcriber, TranscriptionError
 from . import menus, render
@@ -273,7 +273,16 @@ class App:
                     parse_mode=None,
                 )
                 return
-            await m.answer("Your library.", reply_markup=self._reader_kb("Open library"), parse_mode=None)
+            # A personal link for Safari or any browser: the sign-in rides in the part after #, which
+            # browsers never send to the server. It lasts as long as a reader session (30 days).
+            link = f"{self.reader_url}#t={make_token(self.config.bot_token, m.from_user.id)}"
+            kb = self._reader_kb("Open library")
+            kb.inline_keyboard.append([Btn(text="Open in browser", url=link)])
+            await m.answer(
+                "Your library. \"Open in browser\" opens it in Safari or another browser too; that link is "
+                "yours only, so don't share it.",
+                reply_markup=kb, parse_mode=None,
+            )
 
         @r.message(F.document)
         async def document(m: Message):
@@ -648,9 +657,14 @@ class App:
 
     # ================= timer =================
 
-    async def explain_word(self, user_id: int, word: str, sentence: str, context: str, book: str) -> str:
+    async def explain_word(self, user_id: int, word: str, sentence: str, context: str, book: str) -> dict:
         """For the reader: a tapped word explained in its sentence."""
         return await self.agent.explain_word(user_id, word, sentence, context, book)
+
+    async def ask_about_word(self, user_id: int, word: str, sentence: str, context: str, book: str,
+                             explanation: str, history: list, question: str) -> str:
+        """For the reader: a follow-up question in the word card."""
+        return await self.agent.ask_about_word(user_id, word, sentence, context, book, explanation, history, question)
 
     def add_book_word(self, user_id: int, word: str, sentence: str, meaning: str, book: str) -> None:
         """For the reader's Add to Deck: the bot makes the card in the chat, the usual way."""

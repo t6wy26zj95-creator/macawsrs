@@ -19,7 +19,7 @@ from .db import Store, iso, parse
 from .leak import contains_answer
 from .lookalike import find_lookalikes
 from .llm import LLMError, LLMProvider, Models, ToolSpec
-from .prompts import EXPLAIN_PROMPT, SYSTEM_PROMPT
+from .prompts import ASK_PROMPT, EXPLAIN_PROMPT, SYSTEM_PROMPT
 from .templates import (
     DECK_TYPES,
     answer_key,
@@ -64,6 +64,9 @@ NOTHING_MISSED = re.compile(r"^\W*(?:none|nothing|n/?a|no|nil|complete|-+)?\W*$"
 
 def _n(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+PICTURE_LINE = re.compile(r"^\W*picture\W*:\s*(.*)$", re.IGNORECASE)
 
 
 def clean_missed(text: Any) -> str:
@@ -318,20 +321,48 @@ class Agent:
         )
         return actions
 
-    async def explain_word(self, user_id: int, word: str, sentence: str, context: str = "", book: str = "") -> str:
-        """What a word tapped in the book reader means in that very sentence. One call, no tools."""
+    def _reader_llm(self, user_id: int) -> LLMProvider:
         user = self.store.get_user(user_id)
-        llm = self.models.for_user(dict(user)) if self.models and user else self.llm
-        prompt = (
+        return self.models.for_user(dict(user)) if self.models and user else self.llm
+
+    @staticmethod
+    def _passage(word: str, sentence: str, context: str, book: str) -> str:
+        return (
             (f"Book: {book}\n" if book else "")
             + (f"Passage: {context}\n" if context and context != sentence else "")
             + f"Sentence: {sentence}\n"
-            + f"Word tapped: {word}"
+            + ("Word tapped: " if " " not in word else "Words selected: ") + word
         )
-        reply = strip_emoji(await llm.run(EXPLAIN_PROMPT, prompt, []))
-        text = "\n".join(line.strip() for line in reply.splitlines()).strip()
+
+    async def explain_word(self, user_id: int, word: str, sentence: str, context: str = "", book: str = "") -> dict[str, str]:
+        """What a word (or a selected phrase) in the book reader means in that very sentence.
+        One call, no tools. Returns the explanation and a search phrase for a photo ("" for none)."""
+        reply = strip_emoji(await self._reader_llm(user_id).run(
+            EXPLAIN_PROMPT, self._passage(word, sentence, context, book), []))
+        lines, picture = [], ""
+        for line in reply.splitlines():
+            m = PICTURE_LINE.match(line.strip())
+            if m:
+                query = m.group(1).strip(" .*_\"'")
+                picture = "" if query.lower() in ("none", "n/a") else query
+            else:
+                lines.append(line.strip())
+        text = "\n".join(lines).strip()
         if not text:
             raise LLMError("the model gave an empty explanation")
+        return {"text": text, "picture": picture[:60]}
+
+    async def ask_about_word(self, user_id: int, word: str, sentence: str, context: str, book: str,
+                             explanation: str, history: list[tuple[str, str]], question: str) -> str:
+        """A follow-up question about a word looked up in the reader."""
+        prompt = self._passage(word, sentence, context, book) + f"\n\nYour explanation:\n{explanation}"
+        for q, a in history:
+            prompt += f"\n\nThey asked: {q}\nYou answered: {a}"
+        prompt += f"\n\nTheir question now: {question}"
+        reply = strip_emoji(await self._reader_llm(user_id).run(ASK_PROMPT, prompt, []))
+        text = "\n".join(line.strip() for line in reply.splitlines()).strip()
+        if not text:
+            raise LLMError("the model gave an empty answer")
         return text
 
     # ================= turn plumbing =================

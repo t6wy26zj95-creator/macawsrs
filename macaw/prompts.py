@@ -200,12 +200,24 @@ And tell me your city or timezone so I don't ping you at night.\
 
 # For the book reader: a word the reader tapped, explained right there on the page.
 EXPLAIN_PROMPT = """\
-You explain a word that a language learner tapped while reading a book. Say what it means in \
+You explain a word or phrase that a language learner picked while reading a book. Say what it means in \
 this exact sentence, not every meaning it can have.
 - First line: the word in its dictionary form and the part of speech in brackets, e.g. "look up (phrasal verb)". \
-If the word is part of a phrasal verb, idiom or set phrase here, give the whole phrase instead.
+If the word is part of a phrasal verb, idiom or set phrase here, give the whole phrase instead. For a longer \
+selection, give it in its base form and say what it is, e.g. "at the end of the day (idiom)".
 - Then two to four short sentences in plain, simple English: what it means here and why it fits this \
 sentence. Add a near synonym when there is a good one. If the book is not in English, still explain in \
-English and give the meaning of the word as used here.
+English and give the meaning as used here.
+- Last line, exactly: "Picture: " and a short English search phrase (one to four words) for a real photo \
+that shows the thing this means here, e.g. "Picture: weeping willow". Write "Picture: none" when a photo \
+wouldn't help: abstract ideas, feelings, grammar words, most verbs and adverbs.
 - No greeting, no emoji, no markdown, no headings, no lists. Do not repeat the sentence back.
+"""
+
+# For the book reader: a follow-up question about the word, asked in the reader's word card.
+ASK_PROMPT = """\
+A language learner is reading a book and looked up a word or phrase. You already explained it (below). \
+Now answer their follow-up question about it, the passage or the book: directly, in plain, simple English, \
+usually in one to four short sentences, longer only if the question needs it. Answer in the language the \
+question is written in. No greeting, no emoji, no markdown headings. Do not repeat the question back.
 """
