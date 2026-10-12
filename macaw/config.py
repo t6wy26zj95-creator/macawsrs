@@ -41,6 +41,10 @@ class Config:
     # FREE_LLM_API_KEY when that one is a Groq key.
     voice_api_key: str | None = None
     voice_model: str = "whisper-large-v3"
+    # Book reader Mini App: its public https address (empty = not set up yet) and
+    # the local port its web server listens on.
+    reader_url: str | None = None
+    reader_port: int = 8090
 
     @property
     def free_label(self) -> str:
@@ -102,7 +106,15 @@ def load_config() -> Config:
         nvidia_models=_parse_list(os.environ.get("NVIDIA_MODELS", "")) or NVIDIA_MODELS,
         voice_api_key=_voice_key(),
         voice_model=os.environ.get("VOICE_MODEL") or "whisper-large-v3",
+        reader_url=_reader_url(os.environ.get("READER_URL", "")),
+        reader_port=int(os.environ.get("READER_PORT") or 8090),
     )
+
+
+def _reader_url(raw: str) -> str | None:
+    url = raw.strip().rstrip("/")
+    # Telegram only opens Mini Apps over https.
+    return url + "/" if url.startswith("https://") else None
 
 
 def _voice_key() -> str | None:

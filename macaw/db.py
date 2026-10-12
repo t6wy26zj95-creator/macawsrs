@@ -184,6 +184,29 @@ CREATE TABLE IF NOT EXISTS invites (
     used_by     INTEGER,
     used_at     TEXT
 );
+
+-- Books in the reader Mini App. The files live in <data dir>/books/<id>/.
+CREATE TABLE IF NOT EXISTS books (
+    id          INTEGER PRIMARY KEY,
+    user_id     INTEGER NOT NULL,
+    title       TEXT NOT NULL,
+    author      TEXT NOT NULL DEFAULT '',
+    cover       TEXT,                                  -- cover file name in the book folder
+    chars       INTEGER NOT NULL DEFAULT 0,            -- length of the text, for the percentage
+    position    TEXT,                                  -- JSON {"c": chapter, "p": 0..1 within it}
+    percent     REAL NOT NULL DEFAULT 0,
+    finished    INTEGER NOT NULL DEFAULT 0,
+    bookmarks   TEXT NOT NULL DEFAULT '[]',            -- JSON list of {"c", "p", "text", "at"}
+    added_at    TEXT NOT NULL,
+    opened_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS books_user ON books(user_id);
+
+-- Reader look (theme, font, size...), JSON, one row per user.
+CREATE TABLE IF NOT EXISTS reader_prefs (
+    user_id  INTEGER PRIMARY KEY,
+    prefs    TEXT NOT NULL
+);
 """
 
 
@@ -663,3 +686,39 @@ class Store:
             fields["fields"] = json.dumps(fields["fields"], ensure_ascii=False)
         cols = ", ".join(f"{k}=?" for k in fields)
         self.x(f"UPDATE proposals SET {cols} WHERE id=?", (*fields.values(), proposal_id))
+
+    # ---------- books (reader Mini App) ----------
+
+    def add_book(self, user_id: int, title: str, author: str, cover: str | None, chars: int) -> int:
+        return self.x(
+            "INSERT INTO books(user_id, title, author, cover, chars, added_at) VALUES (?,?,?,?,?,?)",
+            (user_id, title, author, cover, chars, iso(utcnow())),
+        )
+
+    def books(self, user_id: int) -> list[sqlite3.Row]:
+        return self.q("SELECT * FROM books WHERE user_id=? ORDER BY COALESCE(opened_at, added_at) DESC", (user_id,))
+
+    def book(self, user_id: int, book_id: int) -> sqlite3.Row | None:
+        return self.q1("SELECT * FROM books WHERE id=? AND user_id=?", (book_id, user_id))
+
+    def update_book(self, book_id: int, **fields: Any) -> None:
+        for k in ("position", "bookmarks"):
+            if k in fields and not isinstance(fields[k], str):
+                fields[k] = json.dumps(fields[k], ensure_ascii=False)
+        if not fields:
+            return
+        cols = ", ".join(f"{k}=?" for k in fields)
+        self.x(f"UPDATE books SET {cols} WHERE id=?", (*fields.values(), book_id))
+
+    def delete_book(self, book_id: int) -> None:
+        self.x("DELETE FROM books WHERE id=?", (book_id,))
+
+    def reader_prefs(self, user_id: int) -> dict:
+        row = self.q1("SELECT prefs FROM reader_prefs WHERE user_id=?", (user_id,))
+        return json.loads(row["prefs"]) if row else {}
+
+    def set_reader_prefs(self, user_id: int, prefs: dict) -> None:
+        self.x(
+            "INSERT INTO reader_prefs(user_id, prefs) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET prefs=excluded.prefs",
+            (user_id, json.dumps(prefs, ensure_ascii=False)),
+        )

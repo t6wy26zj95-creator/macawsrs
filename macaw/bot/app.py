@@ -16,16 +16,17 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, WebAppInfo
 from aiogram.types import InlineKeyboardButton as Btn
 from aiogram.types import InlineKeyboardMarkup as Kb
 
-from .. import pacing, srs
+from .. import books, pacing, srs
 from ..agent import Action, Agent, ConfirmDelete, Preview, RatingNote, Text
 from ..config import Config
 from ..db import Store, iso, parse
 from ..llm import CLAUDE, FREE, LLMError
 from ..prompts import GREETING
+from ..reader.server import Library
 from ..voice import Transcriber, TranscriptionError
 from . import menus, render
 from .transfer import Transfer
@@ -36,6 +37,7 @@ TICK_SECONDS = 30
 LLM_BACKOFF_MIN = 15
 TG_LIMIT = 4000
 INVITE_DAYS = 7
+MAX_BOT_DOWNLOAD = 20 * 1024 * 1024  # the most the Telegram bot API lets a bot download
 
 
 class App:
@@ -46,7 +48,9 @@ class App:
         self.bot = bot
         self.locks: dict[int, asyncio.Lock] = {}
         on_disk = config.db_path and str(config.db_path) != ":memory:"
-        self.transfer = Transfer(store, bot, config.db_path.parent if on_disk else Path(tempfile.gettempdir()) / "macaw")
+        data_dir = config.db_path.parent if on_disk else Path(tempfile.gettempdir()) / "macaw"
+        self.transfer = Transfer(store, bot, data_dir)
+        self.library = Library(store, data_dir)
         self.transcriber = (
             Transcriber(config.voice_api_key, config.voice_model) if config.voice_api_key else None
         )
@@ -255,11 +259,27 @@ class App:
             text, kb = self.transfer.export_menu(m.from_user.id)
             await m.answer(text, reply_markup=kb, parse_mode=None)
 
+        @r.message(Command("books"))
+        async def books_cmd(m: Message):
+            if not self._allowed(m.from_user and m.from_user.id):
+                return
+            if not self.config.reader_url:
+                await m.answer(
+                    "The book reader isn't switched on yet: it needs a web address with https. "
+                    "Once that's set up, this opens your library.",
+                    parse_mode=None,
+                )
+                return
+            await m.answer("Your library.", reply_markup=self._reader_kb("Open library"), parse_mode=None)
+
         @r.message(F.document)
         async def document(m: Message):
             if not self._allowed(m.from_user and m.from_user.id):
                 return
             self.store.ensure_user(m.from_user.id, m.chat.id, self.config.default_timezone)
+            if books.is_book_name(m.document.file_name or ""):
+                await self._add_book(m)
+                return
             async with self.lock(m.from_user.id):
                 await self.transfer.on_document(m)
 
@@ -284,7 +304,7 @@ class App:
         @r.message()
         async def other(m: Message):
             if self._allowed(m.from_user and m.from_user.id):
-                await m.answer("I can only read text, voice messages, and Anki decks (.apkg files).")
+                await m.answer("I can only read text, voice messages, Anki decks (.apkg files) and books (EPUB, FB2, TXT).")
 
         @r.callback_query(F.data.startswith("p:"))
         async def proposal_cb(c: CallbackQuery):
@@ -401,6 +421,33 @@ class App:
             if not self._allowed(c.from_user.id):
                 return
             await self._menu(c)
+
+    def _reader_kb(self, label: str) -> Kb:
+        return Kb(inline_keyboard=[[Btn(text=label, web_app=WebAppInfo(url=self.config.reader_url))]])
+
+    async def _add_book(self, m: Message) -> None:
+        doc = m.document
+        if doc.file_size and doc.file_size > MAX_BOT_DOWNLOAD:
+            await m.answer(
+                "That file is over 20 MB, the most Telegram lets me download. "
+                "Add it with the + button in the library instead.",
+                parse_mode=None,
+            )
+            return
+        buf = io.BytesIO()
+        await self.bot.download(doc, destination=buf)
+        try:
+            row = await asyncio.to_thread(self.library.add, m.from_user.id, buf.getvalue(), doc.file_name or "book")
+        except books.BookError as e:
+            await m.answer(str(e), parse_mode=None)
+            return
+        except Exception:
+            log.exception("adding a book failed")
+            await m.answer("Something went wrong reading that book.", parse_mode=None)
+            return
+        text = f"Added to your library: {row['title']}" + (f" by {row['author']}" if row["author"] else "") + "."
+        kb = self._reader_kb("Read") if self.config.reader_url else None
+        await m.answer(text, reply_markup=kb, parse_mode=None)
 
     async def _redeem(self, m: Message, code: str) -> None:
         name = m.from_user.full_name
