@@ -316,6 +316,9 @@ async def test_pictures_from_commons():
     seen = {}
 
     async def api(request):
+        seen.setdefault("searches", []).append(request.query["gsrsearch"])
+        if request.query["gsrsearch"].startswith(("nothing", "unicorn")):
+            return web.json_response({"batchcomplete": True})
         seen.update(request.query)
         seen["ua"] = request.headers.get("User-Agent", "")
         info = lambda name, w, h, mime="image/jpeg": {
@@ -329,16 +332,38 @@ async def test_pictures_from_commons():
             {"index": 0, "title": "File:Map.svg", "imageinfo": [info("Map", 1200, 800, "image/svg+xml")]},
         ]}})
 
+    async def openverse(request):
+        seen.setdefault("openverse", []).append(request.query["q"])
+        if request.query["q"] != "unicorn":
+            return web.json_response({"results": []})
+        return web.json_response({"results": [
+            {"title": "Horse", "thumbnail": "https://api.openverse.org/v1/images/1/thumb/", "width": 1000,
+             "height": 700, "foreign_landing_url": "https://www.flickr.com/photos/x/1"},
+        ]})
+
     app = web.Application()
     app.router.add_get("/w/api.php", api)
+    app.router.add_get("/v1/images/", openverse)
     srv = TestServer(app)
     await srv.start_server()
+    urls = lambda: {"api": f"http://127.0.0.1:{srv.port}/w/api.php", "openverse": f"http://127.0.0.1:{srv.port}/v1/images/"}
     try:
-        found = await pictures.find("deep pool", api=f"http://127.0.0.1:{srv.port}/w/api.php")
+        found = await pictures.find("deep pool", **urls())
+        assert [p["title"] for p in found] == ["First pool", "Third"]
+        assert found[0]["src"] == "https://upload.wikimedia.org/First.jpg" and found[0]["page"].endswith("First.jpg")
+        assert found[0]["source"] == "Wikimedia Commons"
+        assert seen["gsrsearch"] == "deep pool filetype:bitmap" and "macaw" in seen["ua"]
+        seen.clear()
+        found = await pictures.find("nothing here", **urls())
+        assert seen["searches"] == ["nothing here filetype:bitmap", "here filetype:bitmap"]  # then the last word
+        assert [p["title"] for p in found] == ["First pool", "Third"]
+        seen.clear()
+        # Commons has nothing: Openverse is asked.
+        found = await pictures.find("nothing unicorn", **urls())
+        assert seen["openverse"] == ["nothing unicorn", "unicorn"] and found[0]["source"] == "Openverse"
+        assert found[0]["page"] == "https://www.flickr.com/photos/x/1"
+        gone = urls()
     finally:
         await srv.close()
-    assert [p["title"] for p in found] == ["First pool", "Third"]
-    assert found[0]["src"] == "https://upload.wikimedia.org/First.jpg" and found[0]["page"].endswith("First.jpg")
-    assert seen["gsrsearch"] == "deep pool" and "macaw" in seen["ua"]
-    with pytest.raises(pictures.Unreachable):  # the server is gone
-        await pictures.find("x", api=f"http://127.0.0.1:{srv.port}/w/api.php")
+    with pytest.raises(pictures.Unreachable):  # both servers are gone
+        await pictures.find("x", **gone)
