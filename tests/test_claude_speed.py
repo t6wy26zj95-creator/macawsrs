@@ -102,3 +102,25 @@ def test_options_from_user_row():
         "haiku", "low", False
     )
     assert options_for({"claude_model": "gpt", "claude_effort": "max"}) == ClaudeOptions()
+
+
+async def test_both_kinds_of_turn_stay_ready():
+    p = ClaudeCodeProvider()
+    claude_options.set(ClaudeOptions())
+    other = TOOLS + [ToolSpec("not_an_answer", "x", {"type": "object", "properties": {}}, noop)]
+    await p.run("sys", "answer", other)
+    await settle()
+    await p.run("sys", "chat", TOOLS)
+    await settle()
+    assert len(p._ready) == 2
+    before = len(FakeClient.started)
+    await p.run("sys", "answer again", other)
+    await p.run("sys", "chat again", TOOLS)
+    # Both were served by waiting processes: nothing new was started for them.
+    assert len(FakeClient.started) == before
+    await settle()
+    assert len(p._ready) == 2
+    # Book lookups (no tools) don't push the chat kinds out.
+    await p.run("ask", "word", [])
+    await settle()
+    assert len(p._kinds) == 2 and len(p._ready) == 2
