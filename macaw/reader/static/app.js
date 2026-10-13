@@ -941,7 +941,7 @@ function openCard(w, mode) {
       if (!el.isConnected) return;
       if (!list.length) { picNote(`No photos found for “${q}”`); return; }
       pics.innerHTML = list.map((p, i) => `<button type="button" data-i="${i}" aria-label="${esc(p.title)}"><img src="${esc(p.src)}" alt="${esc(p.title)}" referrerpolicy="no-referrer"></button>`).join('')
-        + '<small>Photos: Wikimedia Commons</small>';
+        + `<small>Photos: ${esc([...new Set(list.map(p => p.source || 'Wikimedia Commons'))].join(', '))}</small>`;
       pics.hidden = false;
       $$('img', pics).forEach(img => {
         img.onerror = () => {
