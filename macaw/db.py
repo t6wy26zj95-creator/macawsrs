@@ -237,6 +237,9 @@ class Store:
         cols = {r["name"] for r in self.q("PRAGMA table_info(users)")}
         if "llm" not in cols:
             self.x("ALTER TABLE users ADD COLUMN llm TEXT")
+        for col, decl in (("claude_model", "TEXT"), ("claude_effort", "TEXT"), ("claude_warm", "INTEGER")):
+            if col not in cols:  # owner speed settings for Claude; NULL = default
+                self.x(f"ALTER TABLE users ADD COLUMN {col} {decl}")
         if "round_fixed" not in cols:  # 1: the user chose cards_per_session as their round size
             self.x("ALTER TABLE users ADD COLUMN round_fixed INTEGER NOT NULL DEFAULT 0")
         note_cols = {r["name"] for r in self.q("PRAGMA table_info(notes)")}

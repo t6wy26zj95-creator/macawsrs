@@ -24,7 +24,7 @@ from .. import books, pacing, srs
 from ..agent import Action, Agent, ConfirmDelete, Preview, RatingNote, Text
 from ..config import Config
 from ..db import Store, iso, parse
-from ..llm import CLAUDE, FREE, LLMError
+from ..llm import CLAUDE, CLAUDE_MODELS, EFFORTS, FREE, LLMError, options_for
 from ..prompts import GREETING
 from ..reader.server import Library, make_token
 from ..reader.tunnel import tunnel_url
@@ -165,17 +165,41 @@ class App:
             text += " Claude isn't answering at the moment, so the free model is standing in until it does."
         if user_id not in self.config.owner_ids:
             return text, None
-        text += " Your cards and our chat stay the same when you switch."
-        mark = lambda name: "• " if name == current else ""  # noqa: E731
+        user = self.store.get_user(user_id)
+        opts = options_for(dict(user))
+        model = opts.model or self._env_model()
+        text += (
+            " Your cards and our chat stay the same when you switch.\n\n"
+            "Model: Opus is the smartest and slowest, Sonnet is faster, Haiku is the fastest.\n"
+            "Thinking: less thinking answers faster but a little less carefully.\n"
+            "Keep Claude ready: starts Claude for your next message in advance, "
+            "so it doesn't have to start from scratch (uses a little server memory)."
+        )
+        mark = lambda on: "• " if on else ""  # noqa: E731
+        on_claude = current == CLAUDE
         kb = Kb(
             inline_keyboard=[
                 [
-                    Btn(text=mark(CLAUDE) + "Claude", callback_data="llm:" + CLAUDE),
-                    Btn(text=mark(FREE) + "Free model", callback_data="llm:" + FREE),
+                    Btn(text=mark(on_claude and model == m) + m.capitalize(), callback_data="ai:m:" + m)
+                    for m in CLAUDE_MODELS
                 ]
+                + [Btn(text=mark(current == FREE) + "Free", callback_data="llm:" + FREE)],
+                [
+                    Btn(text=mark((opts.effort or "high") == e) + f"Thinking: {name}", callback_data="ai:e:" + e)
+                    for e, name in (("high", "full"), ("medium", "medium"), ("low", "light"))
+                ],
+                [
+                    Btn(text=mark(opts.warm) + "Keep Claude ready: on", callback_data="ai:w:1"),
+                    Btn(text=mark(not opts.warm) + "off", callback_data="ai:w:0"),
+                ],
             ]
         )
         return text, kb
+
+    def _env_model(self) -> str:
+        """Which of opus/sonnet/haiku CLAUDE_MODEL in .env names (Opus if unset or unknown)."""
+        env = (self.config.claude_model or "").lower()
+        return next((m for m in CLAUDE_MODELS if m in env), "opus")
 
     def _register(self) -> None:
         r = self.router
@@ -224,6 +248,9 @@ class App:
                 "To change any of these, just tell me, e.g. \"I'm in Berlin\" or \"ask me 3 cards at a time\".",
                 parse_mode=None,
             )
+            text, kb = self._model_menu(m.from_user.id)
+            if kb is not None:
+                await m.answer(text, reply_markup=kb, parse_mode=None)
 
         @r.message(Command("invite"))
         async def invite(m: Message):
@@ -398,6 +425,26 @@ class App:
                 self.store.update_user(uid, llm=choice)
                 # A Claude outage shouldn't keep blocking the other model, and vice versa.
                 self.store.update_state(uid, llm_backoff_until=None)
+            text, kb = self._model_menu(uid)
+            with contextlib.suppress(TelegramBadRequest):  # "message is not modified"
+                await c.message.edit_text(text, reply_markup=kb)
+            await c.answer()
+
+        @r.callback_query(F.data.startswith("ai:"))
+        async def claude_options_cb(c: CallbackQuery):
+            uid = c.from_user.id
+            if uid not in self.config.owner_ids:
+                await c.answer()
+                return
+            _, what, value = c.data.split(":", 2)
+            if what == "m" and value in CLAUDE_MODELS:
+                # Picking a Claude model also switches back from the free model.
+                self.store.update_user(uid, llm=CLAUDE, claude_model=value)
+                self.store.update_state(uid, llm_backoff_until=None)
+            elif what == "e" and value in EFFORTS:
+                self.store.update_user(uid, claude_effort=value)
+            elif what == "w" and value in ("0", "1"):
+                self.store.update_user(uid, claude_warm=int(value))
             text, kb = self._model_menu(uid)
             with contextlib.suppress(TelegramBadRequest):  # "message is not modified"
                 await c.message.edit_text(text, reply_markup=kb)
