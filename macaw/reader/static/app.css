@@ -361,3 +361,15 @@ mark.hit { background: #ffd60a; color: #000; }
 .look-btn svg { width: 18px; height: 18px; }
 .look-add.done { color: #30d158; }
 .look-add:disabled:not(.done) { opacity: .5; }
+
+/* Hold and stretch: our own selection and its handles */
+@media (pointer: coarse) {
+  #flow { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+}
+#pick { position: fixed; inset: 0; pointer-events: none; z-index: 40; }
+#pick .pick-rects span { position: fixed; background: rgba(10, 132, 255, .3); border-radius: 2px; }
+.pick-h { position: fixed; width: 2px; margin-left: -1px; background: var(--accent); pointer-events: auto; touch-action: none; }
+.pick-h::before { content: ''; position: absolute; left: -20px; right: -20px; top: -24px; bottom: -24px; }
+.pick-h i { position: absolute; left: 50%; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: var(--accent); }
+.pick-h.s i { top: -10px; }
+.pick-h.e i { bottom: -10px; }

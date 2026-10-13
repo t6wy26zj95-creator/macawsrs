@@ -754,7 +754,7 @@ viewport.addEventListener('touchend', () => {
 });
 
 viewport.addEventListener('click', e => {
-  if (!R.book) return;
+  if (!R.book || Date.now() - pick.swallowClick < 900) return;
   const a = e.target.closest('a');
   if (a && a.dataset.ext) {
     try { tg.openLink(a.dataset.ext); } catch (err) { window.open(a.dataset.ext, '_blank'); }
@@ -846,7 +846,8 @@ function sentenceOf(w) {
 function lookUp(x, y) {
   const w = wordAt(x, y);
   if (!w) return false;
-  openCard(w, false);
+  endPick();
+  openCard(w, 'tap');
   return true;
 }
 
@@ -857,13 +858,15 @@ function openLink(url) {
 }
 
 // The card next to the word: the meaning, real photos, Ask, and Add to Deck.
-// fromSelection: opened by holding and stretching a selection; it then has no scrim (the handles stay
-// usable) and goes away when the selection does, until the card itself is touched.
-function openCard(w, fromSelection) {
-  if (card) card.close();
+// mode: 'tap' (a tapped word), 'pick' (held and stretched with our own handles) or 'select' (the browser's own
+// selection, with a mouse). The last two have no scrim, so the handles stay usable; a 'select' card goes away
+// with the selection until the card itself is touched, a 'pick' card on a tap anywhere else.
+function openCard(w, mode) {
+  if (card) { pick.keep = true; card.close(); pick.keep = false; }
+  const loose = mode !== 'tap';
   const word = squash(w.word).slice(0, PHRASE_MAX);
   const { sentence, context } = sentenceOf(w);
-  const hl = !fromSelection && window.CSS && CSS.highlights && window.Highlight;
+  const hl = mode === 'tap' && window.CSS && CSS.highlights && window.Highlight;
   if (hl) CSS.highlights.set('look', new Highlight(w.range));
   haptic('light');
 
@@ -889,31 +892,34 @@ function openCard(w, fromSelection) {
       return;
     }
     const roomBelow = innerHeight - r.bottom, roomAbove = r.top;
-    if (roomBelow >= roomAbove || (fromSelection && roomBelow > 260)) {
-      el.style.top = (r.bottom + (fromSelection ? 30 : 10)) + 'px';
-      el.style.maxHeight = (roomBelow - 24 - (fromSelection ? 20 : 0)) + 'px';
+    if (roomBelow >= roomAbove || (loose && roomBelow > 260)) {
+      el.style.top = (r.bottom + (loose ? 30 : 10)) + 'px';
+      el.style.maxHeight = (roomBelow - 24 - (loose ? 20 : 0)) + 'px';
       el.style.transformOrigin = 'top center';
     } else {
-      el.style.bottom = (innerHeight - r.top + (fromSelection ? 50 : 10)) + 'px';
-      el.style.maxHeight = (roomAbove - 44 - (fromSelection ? 40 : 0)) + 'px';
+      el.style.bottom = (innerHeight - r.top + (loose ? 50 : 10)) + 'px';
+      el.style.maxHeight = (roomAbove - 44 - (loose ? 40 : 0)) + 'px';
       el.style.transformOrigin = 'bottom center';
     }
   };
   place();
 
-  const state = { word, explanation: '', history: [], pinned: !fromSelection, fromSelection };
+  const state = { word, explanation: '', history: [], pinned: mode !== 'select', mode };
   const entry = layer(el, {
-    scrim: !fromSelection, clear: true,
+    scrim: !loose, clear: true,
     onClose: () => {
       if (hl) CSS.highlights.delete('look');
+      if (mode === 'pick' && !pick.keep) endPick();
       if (card && card.el === el) card = null;
       document.removeEventListener('pointerdown', outside, true);
     },
   });
   card = { el, state, close: () => entry.close() };
-  // A selection card stays put once touched, and then closes on a tap anywhere else.
-  const outside = e => { if (state.pinned && !el.contains(e.target)) entry.close(); };
-  if (fromSelection) {
+  // A selection card stays put once touched, and then closes on a tap anywhere else (but the handles).
+  const outside = e => {
+    if (state.pinned && !el.contains(e.target) && !(e.target.closest && e.target.closest('.pick-h'))) entry.close();
+  };
+  if (loose) {
     el.addEventListener('pointerdown', () => { state.pinned = true; }, true);
     el.addEventListener('touchstart', () => { state.pinned = true; }, { capture: true, passive: true });
     setTimeout(() => document.addEventListener('pointerdown', outside, true), 0);
@@ -928,16 +934,23 @@ function openCard(w, fromSelection) {
   const key = `${R.id}|${word.toLowerCase()}|${sentence}`;
   const body = () => ({ word, sentence, context });
 
+  const picNote = text => { pics.innerHTML = `<small>${esc(text)}</small>`; pics.hidden = false; };
   const showPictures = q => {
     if (!q) return;
     api('pictures?q=' + encodeURIComponent(q)).then(list => {
-      if (!list.length || !el.isConnected) return;
-      pics.innerHTML = list.map((p, i) => `<button type="button" data-i="${i}" aria-label="${esc(p.title)}"><img src="${esc(p.src)}" alt="${esc(p.title)}" loading="lazy" referrerpolicy="no-referrer"></button>`).join('')
+      if (!el.isConnected) return;
+      if (!list.length) { picNote(`No photos found for “${q}”`); return; }
+      pics.innerHTML = list.map((p, i) => `<button type="button" data-i="${i}" aria-label="${esc(p.title)}"><img src="${esc(p.src)}" alt="${esc(p.title)}" referrerpolicy="no-referrer"></button>`).join('')
         + '<small>Photos: Wikimedia Commons</small>';
       pics.hidden = false;
-      $$('img', pics).forEach(img => { img.onerror = () => img.parentElement.remove(); });
+      $$('img', pics).forEach(img => {
+        img.onerror = () => {
+          img.parentElement.remove();
+          if (!$('img', pics)) picNote("The photos couldn't load");
+        };
+      });
       pics.onclick = e => { const b = e.target.closest('button[data-i]'); if (b && list[+b.dataset.i].page) openLink(list[+b.dataset.i].page); };
-    }).catch(() => {});
+    }).catch(err => { if (el.isConnected) picNote(err.message); });
   };
   const show = res => {
     state.explanation = res.text;
@@ -1012,7 +1025,141 @@ function snapToWords(range) {
   return range;
 }
 
-// Hold a word, stretch the selection over a phrase, let go: the card explains the whole phrase.
+/* Hold a word, then stretch over a phrase: our own selection with handles, since the in-app browser of
+   Telegram on iPhone doesn't let text be selected. Keep holding and slide, or drag a handle afterwards;
+   when the finger lifts, the card explains the whole phrase. */
+const pick = { range: null, anchor: null, drag: null, timer: 0, swallowClick: 0, keep: false, box: null };
+const HOLD_MS = 450;
+
+// The word at a point (or the spot, between words), without the tap-on-the-word check.
+function wordRangeAt(x, y) {
+  const c = caretAt(x, y);
+  if (!c || c.startContainer.nodeType !== 3 || !flow.contains(c.startContainer)) return null;
+  return snapToWords(c);
+}
+
+function union(a, b) {
+  const r = document.createRange();
+  const s = a.compareBoundaryPoints(Range.START_TO_START, b) <= 0 ? a : b;
+  const e = a.compareBoundaryPoints(Range.END_TO_END, b) >= 0 ? a : b;
+  r.setStart(s.startContainer, s.startOffset);
+  r.setEnd(e.endContainer, e.endOffset);
+  return r;
+}
+
+function drawPick() {
+  if (!pick.range) return;
+  if (!pick.box) {
+    pick.box = document.createElement('div');
+    pick.box.id = 'pick';
+    pick.box.innerHTML = '<div class="pick-rects"></div><div class="pick-h s"><i></i></div><div class="pick-h e"><i></i></div>';
+    reader.appendChild(pick.box);
+    $$('.pick-h', pick.box).forEach(h => {
+      h.addEventListener('pointerdown', e => startHandle(e, h.classList.contains('s') ? 'start' : 'end'));
+    });
+  }
+  const rects = [...pick.range.getClientRects()].filter(r => r.width > 1);
+  if (!rects.length) return;
+  $('.pick-rects', pick.box).innerHTML = rects.map(r =>
+    `<span style="left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px"></span>`).join('');
+  const first = rects[0], last = rects[rects.length - 1];
+  const [hs, he] = $$('.pick-h', pick.box);
+  hs.style.cssText = `left:${first.left}px;top:${first.top}px;height:${first.height}px`;
+  he.style.cssText = `left:${last.right}px;top:${last.top}px;height:${last.height}px`;
+}
+
+function endPick() {
+  clearTimeout(pick.timer);
+  pick.range = pick.anchor = pick.drag = null;
+  if (pick.box) { pick.box.remove(); pick.box = null; }
+}
+
+function stretchTo(x, y) {
+  const r = wordRangeAt(x, y);
+  if (!r || !pick.anchor) return;
+  const next = union(pick.anchor, r);
+  if (next.toString().length > PHRASE_MAX) return;
+  if (pick.range && next.toString() !== pick.range.toString()) haptic('light');
+  pick.range = next;
+  drawPick();
+}
+
+function openPickCard() {
+  const phrase = squash(pick.range.toString());
+  if (!/\p{L}/u.test(phrase)) { endPick(); return; }
+  openCard({ range: pick.range.cloneRange(), word: phrase }, 'pick');
+}
+
+function startHandle(e, which) {
+  e.preventDefault();
+  e.stopPropagation();
+  const h = e.currentTarget;
+  // The word at the other end stays; the dragged end follows the finger.
+  const fixed = document.createRange();
+  if (which === 'start') fixed.setStart(pick.range.endContainer, pick.range.endOffset);
+  else fixed.setStart(pick.range.startContainer, pick.range.startOffset);
+  pick.anchor = snapToWords(fixed);
+  pick.drag = which;
+  if (card && card.state.mode === 'pick') { pick.keep = true; card.close(); pick.keep = false; }
+  try { h.setPointerCapture(e.pointerId); } catch (err) { /* old browsers */ }
+  // The finger covers the text: aim a little above it for the end handle, below for the start one.
+  const aim = ev => stretchTo(ev.clientX, ev.clientY + (which === 'start' ? 12 : -14));
+  const up = () => {
+    h.removeEventListener('pointermove', aim);
+    h.removeEventListener('pointerup', up);
+    h.removeEventListener('pointercancel', up);
+    pick.drag = null;
+    if (pick.range) openPickCard();
+  };
+  h.addEventListener('pointermove', aim);
+  h.addEventListener('pointerup', up);
+  h.addEventListener('pointercancel', up);
+}
+
+viewport.addEventListener('touchstart', e => {
+  clearTimeout(pick.timer);
+  if (e.touches.length !== 1 || !R.book) return;
+  const { clientX: x, clientY: y } = e.touches[0];
+  pick.timer = setTimeout(() => {
+    const w = wordAt(x, y);
+    if (!w) return;
+    if (card) card.close();
+    endPick();
+    touch.active = false; // no page turn from this touch
+    pick.anchor = w.range;
+    pick.range = w.range;
+    pick.drag = 'hold';
+    pick.swallowClick = Date.now();
+    drawPick();
+    haptic('medium');
+  }, HOLD_MS);
+}, { passive: true });
+
+viewport.addEventListener('touchmove', e => {
+  if (pick.drag === 'hold') {
+    e.preventDefault();
+    stretchTo(e.touches[0].clientX, e.touches[0].clientY - 14);
+    return;
+  }
+  if (pick.timer) {
+    const t = e.touches[0];
+    if (Math.abs(t.clientX - touch.x) > 10 || Math.abs(t.clientY - touch.y) > 10) { clearTimeout(pick.timer); pick.timer = 0; }
+  }
+}, { passive: false });
+
+const letGo = () => {
+  clearTimeout(pick.timer);
+  pick.timer = 0;
+  if (pick.drag !== 'hold') return;
+  pick.drag = null;
+  pick.swallowClick = Date.now();
+  openPickCard();
+};
+viewport.addEventListener('touchend', letGo);
+viewport.addEventListener('touchcancel', letGo);
+viewport.addEventListener('contextmenu', e => { if (pick.range) e.preventDefault(); });
+
+// With a mouse, the browser's own selection works the same way: select a phrase, the card explains it.
 let selTimer = 0;
 document.addEventListener('selectionchange', () => {
   clearTimeout(selTimer);
@@ -1020,7 +1167,7 @@ document.addEventListener('selectionchange', () => {
   const sel = getSelection();
   const inBook = sel.rangeCount && !sel.isCollapsed && flow.contains(sel.getRangeAt(0).commonAncestorContainer);
   if (!inBook) {
-    if (card && card.state.fromSelection && !card.state.pinned) card.close();
+    if (card && card.state.mode === 'select' && !card.state.pinned) card.close();
     return;
   }
   selTimer = setTimeout(() => {
@@ -1030,14 +1177,15 @@ document.addEventListener('selectionchange', () => {
     const phrase = squash(range.toString());
     if (!/\p{L}/u.test(phrase) || !flow.contains(range.commonAncestorContainer)) return;
     if (card && card.state.word === phrase.slice(0, PHRASE_MAX)) return;
-    if (card && !card.state.fromSelection) return; // a tapped word's card is open: leave it be
-    openCard({ range, word: phrase }, true);
+    if (card && card.state.mode !== 'select') return; // another card is open: leave it be
+    openCard({ range, word: phrase }, 'select');
   }, 650);
 });
 
 let lastScroll = 0;
 viewport.addEventListener('scroll', () => {
   if (!prefs.scroll || !R.book) return;
+  if (pick.range) drawPick();
   const y = viewport.scrollTop;
   if (Math.abs(y - lastScroll) > 30) { reader.classList.add('bare'); lastScroll = y; }
   updatePill();

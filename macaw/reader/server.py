@@ -367,11 +367,15 @@ class ReaderServer:
         key = q.lower()
         found = self._pictures.get(key)
         if found is None:
-            found = await self.find_pictures(q)
-            if found:  # nothing found may just be the network; ask again next time
-                if len(self._pictures) >= 300:
-                    self._pictures.pop(next(iter(self._pictures)))
-                self._pictures[key] = found
+            try:
+                found = await self.find_pictures(q)
+            except pictures.Unreachable as e:
+                log.warning("photos for %r: Wikimedia Commons unreachable (%s)", q, e)
+                return web.json_response({"error": "Couldn't reach Wikimedia for photos."}, status=502)
+            log.info("photos for %r: %d found", q, len(found))
+            if len(self._pictures) >= 300:
+                self._pictures.pop(next(iter(self._pictures)))
+            self._pictures[key] = found
         resp = web.json_response(found)
         resp.headers["Cache-Control"] = "private, max-age=86400"
         return resp

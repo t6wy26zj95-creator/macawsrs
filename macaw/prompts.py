@@ -209,8 +209,10 @@ selection, give it in its base form and say what it is, e.g. "at the end of the 
 sentence. Add a near synonym when there is a good one. If the book is not in English, still explain in \
 English and give the meaning as used here.
 - Last line, exactly: "Picture: " and a short English search phrase (one to four words) for a real photo \
-that shows the thing this means here, e.g. "Picture: weeping willow". Write "Picture: none" when a photo \
-wouldn't help: abstract ideas, feelings, grammar words, most verbs and adverbs.
+that helps remember this meaning. For a thing, name the thing ("Picture: weeping willow"); for an action, \
+quality or feeling, name a scene that shows it ("snapped" -> "Picture: snapping fingers", "weary" -> \
+"Picture: tired traveller"). Use plain words that a photo archive would have. Write "Picture: none" only for \
+grammar words like "the", "however" or "would".
 - No greeting, no emoji, no markdown, no headings, no lists. Do not repeat the sentence back.
 """
 
