@@ -50,15 +50,13 @@ class _Ready:
         self.client: ClaudeSDKClient | None = None
         self.handlers = handlers
         self.ran = False  # a tool ran in the current turn
-        self.born = time.monotonic()
 
 
 class ClaudeCodeProvider:
-    # Each running Claude Code process takes a little memory on the server,
-    # so only the last few kinds of turns are kept ready.
+    # Each waiting Claude Code process takes about 200 MB on the server (the
+    # service may use 768 MB), so only the last two kinds of turns are kept
+    # ready: usually an answer to a card and any other message.
     MAX_READY = 2
-    # A process left waiting this long is replaced by a fresh one before use.
-    MAX_READY_AGE = 3600
 
     def __init__(self, model: str | None = None, max_turns: int = 10):
         self.model = model
@@ -67,6 +65,8 @@ class ClaudeCodeProvider:
         self.workdir = tempfile.mkdtemp(prefix="macaw-claude-")
         self._ready: dict[tuple, _Ready] = {}
         self._warming: set[tuple] = set()
+        # The kinds of turns seen lately, most recent last, with what's needed to start one.
+        self._kinds: dict[tuple, tuple[str, list[ToolSpec], ClaudeOptions]] = {}
         self._tasks: set[asyncio.Task] = set()
 
     def _sdk_tools(self, tools: list[ToolSpec], ready: _Ready):
@@ -132,8 +132,8 @@ class ClaudeCodeProvider:
                 await ready.client.disconnect()
 
     async def _warm(self, key: tuple, system: str, tools: list[ToolSpec], opts: ClaudeOptions) -> None:
-        """Start the next process for this kind of turn now, so the next message doesn't wait for it."""
-        if key in self._warming:
+        """Start a process for this kind of turn now, so the next such message doesn't wait for it."""
+        if key in self._warming or key in self._ready:
             return
         self._warming.add(key)
         try:
@@ -143,12 +143,21 @@ class ClaudeCodeProvider:
             return
         finally:
             self._warming.discard(key)
-        old = self._ready.pop(key, None)
+        if key not in self._kinds or key in self._ready:  # forgotten or filled meanwhile
+            await self._close(ready)
+            return
         self._ready[key] = ready
-        if old:
-            await self._close(old)
-        while len(self._ready) > self.MAX_READY:
-            await self._close(self._ready.pop(next(iter(self._ready))))
+
+    async def _after_turn(self, used: _Ready | None, warm: bool) -> None:
+        """After the reply is out: close the used process, then refill every recent kind of turn.
+
+        One at a time, so no more than two Claude Code processes run at once."""
+        if used is not None:
+            await self._close(used)
+        if not warm:
+            return
+        for key, (system, tools, opts) in list(self._kinds.items()):
+            await self._warm(key, system, tools, opts)
 
     def _background(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -156,6 +165,7 @@ class ClaudeCodeProvider:
         task.add_done_callback(self._tasks.discard)
 
     async def _close_all(self) -> None:
+        self._kinds.clear()
         while self._ready:
             await self._close(self._ready.pop(next(iter(self._ready))))
 
@@ -169,9 +179,14 @@ class ClaudeCodeProvider:
         key = self._key(system, tools, opts)
         t0 = time.monotonic()
         ready = self._ready.pop(key, None)
-        if ready and time.monotonic() - ready.born > self.MAX_READY_AGE:
-            await self._close(ready)
-            ready = None
+        if opts.warm and tools:  # chat turns; book lookups (no tools) don't push them out
+            self._kinds.pop(key, None)
+            self._kinds[key] = (system, tools, opts)
+            while len(self._kinds) > self.MAX_READY:
+                old = next(iter(self._kinds))
+                del self._kinds[old]
+                if old in self._ready:
+                    await self._close(self._ready.pop(old))
         was_waiting = ready is not None
         try:
             try:
@@ -194,11 +209,8 @@ class ClaudeCodeProvider:
         except Exception as e:
             raise LLMError(str(e)) from e
         finally:
-            # Closing the used process and starting the next one happen after the reply is sent.
-            if ready is not None:
-                self._background(self._close(ready))
-            if opts.warm:
-                self._background(self._warm(key, system, tools, opts))
+            # Closing the used process and starting the next ones happen after the reply is sent.
+            self._background(self._after_turn(ready, opts.warm))
 
         if result is not None and result.usage:
             u = result.usage
