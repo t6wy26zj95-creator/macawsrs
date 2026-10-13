@@ -11,6 +11,7 @@ from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 
 from macaw import books
+from macaw.reader import pictures
 from macaw.reader import server as reader
 from tests.bookfiles import PNG, make_epub, make_fb2
 
@@ -192,6 +193,8 @@ async def test_tap_a_word_explain_and_add(store, tmp_path):
 
     async def find_pictures(q):
         calls["pics"].append(q)
+        if q == "offline":
+            raise pictures.Unreachable("no network")
         return [{"src": "https://upload.wikimedia.org/x.jpg"}] if q != "nothing" else []
 
     srv = reader.ReaderServer(BOT_TOKEN, lambda uid: uid in (42, 7), lib, store, explain=explain,
@@ -227,9 +230,12 @@ async def test_tap_a_word_explain_and_add(store, tmp_path):
         r = await client.get("/api/pictures?q=deep%20pool", headers=h)
         assert await r.json() == [{"src": "https://upload.wikimedia.org/x.jpg"}]
         await client.get("/api/pictures?q=Deep  pool", headers=h)
+        assert await (await client.get("/api/pictures?q=nothing", headers=h)).json() == []
         await client.get("/api/pictures?q=nothing", headers=h)
-        await client.get("/api/pictures?q=nothing", headers=h)
-        assert calls["pics"] == ["deep pool", "nothing", "nothing"]  # found photos are kept, misses asked again
+        r = await client.get("/api/pictures?q=offline", headers=h)
+        assert r.status == 502 and "Wikimedia" in (await r.json())["error"]
+        await client.get("/api/pictures?q=offline", headers=h)
+        assert calls["pics"] == ["deep pool", "nothing", "offline", "offline"]  # answers are kept, outages asked again
         assert (await client.get("/api/pictures?q=x")).status == 401
 
         # Only the owner of the book, and only with a session.
@@ -307,21 +313,20 @@ async def test_explain_without_picture_and_follow_up(store):
 async def test_pictures_from_commons():
     from aiohttp import web
 
-    from macaw.reader import pictures
-
     seen = {}
 
     async def api(request):
         seen.update(request.query)
         seen["ua"] = request.headers.get("User-Agent", "")
-        info = lambda name, w, h: {"thumburl": f"https://upload.wikimedia.org/{name}.jpg", "thumbwidth": 360,
-                                   "thumbheight": 240, "width": w, "height": h,
-                                   "descriptionurl": f"https://commons.wikimedia.org/wiki/File:{name}.jpg"}
+        info = lambda name, w, h, mime="image/jpeg": {
+            "thumburl": f"https://upload.wikimedia.org/{name}.jpg", "thumbwidth": 360, "thumbheight": 240,
+            "width": w, "height": h, "mime": mime, "descriptionurl": f"https://commons.wikimedia.org/wiki/File:{name}.jpg"}
         return web.json_response({"query": {"pages": [
             {"index": 3, "title": "File:Third.jpg", "imageinfo": [info("Third", 1200, 800)]},
             {"index": 1, "title": "File:First pool.jpg", "imageinfo": [info("First", 4000, 3000)]},
             {"index": 2, "title": "File:Strip.jpg", "imageinfo": [info("Strip", 9000, 600)]},  # a panorama
             {"index": 4, "title": "File:Tiny.jpg", "imageinfo": [info("Tiny", 120, 90)]},
+            {"index": 0, "title": "File:Map.svg", "imageinfo": [info("Map", 1200, 800, "image/svg+xml")]},
         ]}})
 
     app = web.Application()
@@ -334,5 +339,6 @@ async def test_pictures_from_commons():
         await srv.close()
     assert [p["title"] for p in found] == ["First pool", "Third"]
     assert found[0]["src"] == "https://upload.wikimedia.org/First.jpg" and found[0]["page"].endswith("First.jpg")
-    assert seen["gsrsearch"] == "deep pool filemime:image/jpeg" and "macaw" in seen["ua"]
-    assert await pictures.find("x", api=f"http://127.0.0.1:{srv.port}/w/api.php") == []  # offline: no photos
+    assert seen["gsrsearch"] == "deep pool" and "macaw" in seen["ua"]
+    with pytest.raises(pictures.Unreachable):  # the server is gone
+        await pictures.find("x", api=f"http://127.0.0.1:{srv.port}/w/api.php")
