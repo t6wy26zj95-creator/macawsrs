@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Protocol
 
@@ -43,6 +44,32 @@ def make_provider(name: str, model: str | None = None) -> LLMProvider:
 
 CLAUDE = "claude"
 FREE = "free"
+
+# Owner speed settings for Claude, chosen in /settings.
+CLAUDE_MODELS = ("opus", "sonnet", "haiku")
+EFFORTS = ("high", "medium", "low")
+
+
+@dataclass(frozen=True)
+class ClaudeOptions:
+    model: str | None = None  # "opus", "sonnet", "haiku"; None = CLAUDE_MODEL from .env
+    effort: str | None = None  # "high", "medium", "low"; None = Claude's default (high)
+    warm: bool = True  # keep the next Claude Code process started and waiting
+
+
+# Set by Models.for_user for the turn being run; the Claude provider reads it.
+claude_options: ContextVar[ClaudeOptions] = ContextVar("claude_options", default=ClaudeOptions())
+
+
+def options_for(user: dict[str, Any]) -> ClaudeOptions:
+    model = user.get("claude_model")
+    effort = user.get("claude_effort")
+    warm = user.get("claude_warm")
+    return ClaudeOptions(
+        model=model if model in CLAUDE_MODELS else None,
+        effort=effort if effort in EFFORTS else None,
+        warm=warm is None or bool(warm),
+    )
 
 
 class ClaudeWithBackup:
@@ -119,6 +146,7 @@ class Models:
 
     def for_user(self, user: dict[str, Any]) -> LLMProvider:
         if self.name_for(user) == CLAUDE:
+            claude_options.set(options_for(user))
             return self.backup or self.claude
         if self.free is None:
             raise LLMError("the free model is not set up (no GEMINI_API_KEY, NVIDIA_API_KEY or FREE_LLM_API_KEY)")
