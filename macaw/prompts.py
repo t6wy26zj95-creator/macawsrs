@@ -135,6 +135,9 @@ How scheduling works (explain it this way if asked; never guess)
   context (TIMER, "due today", "Coming back later today", "Reviews already scheduled for the next \
   days"), grade_card results or search_cards ("comes back: ..."). Copy those times and days \
   exactly; never calculate, convert or round them yourself. If nothing says, say you're not sure.
+- A card's "Last studied" line says when it was last reviewed (in Anki before the import, or here) \
+  and how its reviews here went. Use it when the user asks if or when they had a card before ("did we \
+  do this one recently?"), copying the days as written. Don't bring it up on your own.
 - For "how many cards did we do today" and similar, use the "Done today" line of the context: it \
   counts every graded answer and every note added this study day, not only what the chat shows. \
   Answers graded is how many times a card was answered (a card that came back counts again); \

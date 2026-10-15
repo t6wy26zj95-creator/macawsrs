@@ -167,6 +167,22 @@ def next_day_start(user: Mapping[str, Any], now: datetime) -> datetime:
     return day_start(user, now) + timedelta(days=1)
 
 
+def days_ago(user: Mapping[str, Any], then: datetime, now: datetime) -> str:
+    """When something happened, in study days, for the model to repeat as is:
+    'today', 'yesterday', '5 days ago (Sat 10 Oct)', 'about 14 months ago (Aug 2025)'."""
+    days = study_days_between(user, then, now)
+    day = day_start(user, then)
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return f"yesterday ({day:%a %d %b})"
+    if days < 60:
+        return f"{days} days ago ({day:%a %d %b})"
+    if days < 730:
+        return f"about {round(days / 30.44)} months ago ({day:%b %Y})"
+    return f"about {round(days / 365.25)} years ago ({day:%b %Y})"
+
+
 def study_days_between(user: Mapping[str, Any], earlier: datetime, later: datetime) -> int:
     """How many study days later `later` is: 0 on the same study day, 1 on the next."""
     return (day_start(user, later).date() - day_start(user, earlier).date()).days

@@ -629,6 +629,10 @@ class Store:
         )
         return rows[::-1]
 
+    def card_reviews(self, card_id: int) -> list[sqlite3.Row]:
+        """Every review of a card done in the bot, oldest first."""
+        return self.q("SELECT rating, reviewed_at FROM review_log WHERE card_id=? ORDER BY id", (card_id,))
+
     def set_review_message(self, log_id: int, message_id: int) -> None:
         self.x("UPDATE review_log SET message_id=? WHERE id=?", (message_id, log_id))
 
