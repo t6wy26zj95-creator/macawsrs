@@ -140,3 +140,14 @@ def test_comes_back_uses_the_study_day_rule(store, user):
     assert srs.comes_back(user, card, now) == "today at 00:18"
     card.update(state=0)
     assert srs.comes_back(user, card, now).startswith("not studied yet")
+
+
+def test_days_ago_counts_study_days(user):
+    user = {**user, "timezone": "UTC", "quiet_start": "00:00", "quiet_end": "08:00"}
+    now = at("2026-10-15 12:00")
+    assert srs.days_ago(user, at("2026-10-15 09:00"), now) == "today"
+    # 03:00 before quiet hours end still belongs to the study day that began the day before
+    assert srs.days_ago(user, at("2026-10-14 03:00"), now) == "2 days ago (Tue 13 Oct)"
+    assert srs.days_ago(user, at("2026-10-14 20:00"), now) == "yesterday (Wed 14 Oct)"
+    assert srs.days_ago(user, at("2025-08-20 12:00"), now) == "about 14 months ago (Aug 2025)"
+    assert srs.days_ago(user, at("2023-01-10 12:00"), now) == "about 4 years ago (Jan 2023)"

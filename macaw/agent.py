@@ -130,6 +130,7 @@ REGRADE_WINDOW = timedelta(hours=6)
 JUST_GRADED = timedelta(minutes=30)
 MAX_MESSAGE_CHARS = 500
 DUE_LIST_LIMIT = 15
+REVIEWS_SHOWN = 4  # latest reviews listed on a card's 'Last studied' line
 MAX_USER_NOTES = 20
 # Arguing against giving up a day only makes sense with a good part of it still ahead.
 PUSHBACK_MIN_LEFT = timedelta(hours=3)
@@ -753,7 +754,7 @@ class Agent:
 
     # ================= context =================
 
-    def _card_brief(self, card: dict[str, Any], with_answer: bool) -> str:
+    def _card_brief(self, card: dict[str, Any], with_answer: bool, turn: Turn) -> str:
         note = self.store.note(card["note_id"])
         deck = self.store.deck(note["deck_id"])
         fields = deck_fields(deck)
@@ -774,7 +775,27 @@ class Agent:
         if with_answer:
             s += f"\n  Answer (secret until they reply; the user can't see any of this card): {answer}"
             s += self._answer_history(card["id"])
+        s += "\n  " + self._studied_line(card, turn)
         return s
+
+    def _studied_line(self, card: dict[str, Any], turn: Turn) -> str:
+        """When the card was last studied and how it went, worked out in code, so 'did we do this
+        one recently?' gets a real answer instead of a guess."""
+        last = parse(card["last_review"])
+        if card["state"] == srs.NEW or last is None:
+            return "Last studied: never, this is its first time."
+        when = lambda t: srs.days_ago(turn.user, t, turn.now)  # noqa: E731
+        s = f"Last studied: {when(last)}."
+        rows = self.store.card_reviews(card["id"])
+        if not rows:
+            return s + " That was in Anki, before the deck was imported; not reviewed in this bot yet."
+        first = parse(rows[0]["reviewed_at"])
+        recent = ", ".join(
+            f"{when(parse(r['reviewed_at']))} {srs.RATING_NAMES[r['rating']]}" for r in rows[-REVIEWS_SHOWN:]
+        )
+        if len(rows) == 1:
+            return s + f" Reviewed in this bot once, graded {srs.RATING_NAMES[rows[0]['rating']]}."
+        return s + f" Reviewed in this bot {len(rows)} times, first {when(first)}; latest: {recent}."
 
     def _answer_history(self, card_id: int) -> str:
         """What earlier answers to this card left out, so a gap that keeps coming
@@ -840,7 +861,7 @@ class Agent:
         active = st["active_card_id"]
         if active and self.store.card(active):
             lines.append("ACTIVE CARD (asked, waiting for the user's answer):")
-            lines.append(self._card_brief(dict(self.store.card(active)), with_answer=True))
+            lines.append(self._card_brief(dict(self.store.card(active)), True, turn))
         else:
             lines.append("ACTIVE CARD: none. Do not quiz the user on your own; call next_card if they want one.")
 
@@ -1154,7 +1175,7 @@ class Agent:
                     return (
                         f"Graded {srs.RATING_NAMES[rating]}. {back} Continue the session (card {count + 1} of "
                         f"{target} in this round): ask this next card now, in the same message, without "
-                        "revealing its answer:\n" + self._card_brief(nxt, True)
+                        "revealing its answer:\n" + self._card_brief(nxt, True, turn)
                     )
             gap = self._end_session(turn)
             left = len(srs.due_today(store, turn.user, turn.now))
@@ -1225,7 +1246,7 @@ class Agent:
             if st["active_card_id"]:
                 store.update_state(uid, burst=st["burst"] + want - 1)
                 return "A card is already active; ask it:\n" + self._card_brief(
-                    dict(store.card(st["active_card_id"])), True
+                    dict(store.card(st["active_card_id"])), True, turn
                 )
             nxt = parse(st["next_ask_at"])
             if nxt and nxt > turn.now and not args.get("user_asked_now"):
@@ -1251,7 +1272,7 @@ class Agent:
                         "next_card again."
                     )
                 return "Nothing is due right now. Tell the user they're all caught up (or offer to add new cards)."
-            return "Ask this card now, without revealing the answer:\n" + self._card_brief(card, True)
+            return "Ask this card now, without revealing the answer:\n" + self._card_brief(card, True, turn)
 
         async def pause_reviews(args):
             st = store.state(uid)

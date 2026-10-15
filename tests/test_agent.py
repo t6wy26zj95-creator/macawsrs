@@ -1013,3 +1013,34 @@ async def test_a_plain_miss_then_a_small_gap_is_not_a_gap_that_keeps_coming_back
 
     llm.script.append(right)
     await agent.on_user_message(UID, "really happy", later + timedelta(minutes=1))
+
+
+async def test_the_card_says_when_it_was_last_studied(agent, llm, store):
+    await _make_deck_with_card(agent, llm, word="brittle", meaning="hard but easily broken")
+    llm.script.append(lambda p, t: _ret("What does 'brittle' mean?"))
+    await agent.ask_next(UID, NOW)
+    assert "Last studied: never" in llm.prompts[-1]
+    card_id = store.state(UID)["active_card_id"]
+
+    # As if imported from Anki, last reviewed there long ago.
+    store.x("UPDATE cards SET state=?, step=NULL, stability=30, difficulty=5, last_review=?, due=? WHERE id=?",
+            (srs.REVIEW, iso(NOW - timedelta(days=430)), iso(NOW), card_id))
+    llm.script.append(lambda p, t: _ret("Not since Aug 2025."))
+    await agent.on_user_message(UID, "Did we do this one recently?", NOW + timedelta(minutes=1))
+    prompt = llm.prompts[-1]
+    assert "Last studied: about 14 months ago (Aug 2025)" in prompt
+    assert "in Anki, before the deck was imported" in prompt
+
+    async def grade(prompt, t):
+        await t["grade_card"]({"card_id": card_id, "rating": "Good", "reason": "right"})
+        return "Good."
+
+    llm.script.append(grade)
+    await agent.on_user_message(UID, "easily broken", NOW + timedelta(minutes=2))
+    later = srs.parse(store.card(card_id)["due"]) + timedelta(minutes=1)
+    store.update_state(UID, active_card_id=None, next_ask_at=None)
+    llm.script.append(lambda p, t: _ret("What does 'brittle' mean?"))
+    await agent.ask_next(UID, later)
+    line = next(x for x in llm.prompts[-1].splitlines() if "Last studied:" in x)
+    assert "ago" in line and "Anki" not in line
+    assert re.search(r"Reviewed in this bot once, graded Good\.", line), line
