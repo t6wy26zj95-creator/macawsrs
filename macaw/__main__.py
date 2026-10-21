@@ -53,6 +53,7 @@ async def main() -> None:
         BotCommand(command="books", description="Open your book library"),
         BotCommand(command="settings", description="Timezone, quiet hours, reminders"),
         BotCommand(command="model", description="Which AI model you're using"),
+        BotCommand(command="rules", description="What you've asked me to always or never do"),
     ]
     await bot.set_my_commands(commands)
     owner_commands = commands + [
