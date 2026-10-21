@@ -281,6 +281,14 @@ class App:
             text, kb = self._model_menu(m.from_user.id)
             await m.answer(text, reply_markup=kb, parse_mode=None)
 
+        @r.message(Command("rules"))
+        async def rules(m: Message):
+            if not self._allowed(m.from_user and m.from_user.id):
+                return
+            self.store.ensure_user(m.from_user.id, m.chat.id, self.config.default_timezone)
+            text, kb = self._rules_menu(m.from_user.id)
+            await m.answer(text, reply_markup=kb, parse_mode=None)
+
         @r.message(Command("export"))
         async def export(m: Message):
             if not self._allowed(m.from_user and m.from_user.id):
@@ -462,6 +470,16 @@ class App:
                 await c.message.edit_text(text, reply_markup=kb)
             await c.answer("Removed. Their cards are kept in case you invite them again." if removed else None)
 
+        @r.callback_query(F.data.startswith("rule:"))
+        async def rule_cb(c: CallbackQuery):
+            if not self._allowed(c.from_user.id):
+                return
+            removed = self.store.delete_rule(c.from_user.id, int(c.data.split(":", 1)[1]))
+            text, kb = self._rules_menu(c.from_user.id)
+            with contextlib.suppress(TelegramBadRequest):
+                await c.message.edit_text(text, reply_markup=kb)
+            await c.answer("Removed. I won't follow that one any more." if removed else "Already gone.")
+
         @r.callback_query(F.data.startswith("imp:"))
         async def import_cb(c: CallbackQuery):
             if not self._allowed(c.from_user.id):
@@ -519,6 +537,21 @@ class App:
         if owner:
             with contextlib.suppress(Exception):  # a failed heads-up must not block the guest
                 await self.bot.send_message(owner["chat_id"], f"{name} joined with your invite link.")
+
+    def _rules_menu(self, user_id: int) -> tuple[str, Kb | None]:
+        rows = self.store.rules(user_id)
+        if not rows:
+            return (
+                "No rules yet. Just tell me in chat when you want me to stop or start doing something, "
+                "e.g. \"stop explaining words with Latin\", and I'll keep to it from then on."
+            ), None
+        text = "What you've asked me to always or never do:\n\n" + "\n".join(
+            f"{i}. {r['text']}" for i, r in enumerate(rows, 1)
+        ) + "\n\nTap a button to remove a rule, or just tell me in chat."
+        kb = Kb(inline_keyboard=[
+            [Btn(text=f"Remove {i}", callback_data=f"rule:{r['id']}")] for i, r in enumerate(rows, 1)
+        ])
+        return text, kb
 
     def _guest_menu(self) -> tuple[str, Kb | None]:
         rows = self.store.guests()

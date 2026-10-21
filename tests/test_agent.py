@@ -1044,3 +1044,52 @@ async def test_the_card_says_when_it_was_last_studied(agent, llm, store):
     line = next(x for x in llm.prompts[-1].splitlines() if "Last studied:" in x)
     assert "ago" in line and "Anki" not in line
     assert re.search(r"Reviewed in this bot once, graded Good\.", line), line
+
+
+async def test_standing_rules_are_kept_in_every_prompt_until_removed(agent, llm, store):
+    async def save(prompt, t):
+        assert "THE USER'S STANDING RULES: none yet" in prompt
+        out = await t["save_rule"]({"text": "Never use Latin or Greek roots as memory hooks; the user doesn't know Latin."})
+        assert out.startswith("Saved as rule #")
+        assert await t["save_rule"]({"text": "never use latin or greek roots as memory hooks; the user doesn't know latin."}) \
+            == "Already saved as a rule."
+        return "Got it, no more Latin."
+
+    llm.script.append(save)
+    await agent.on_user_message(UID, "stop with the Latin, I don't know Latin", NOW)
+    assert len(store.rules(UID)) == 1
+
+    # Days later, in an unrelated talk, the rule is still in the prompt.
+    await agent.on_user_message(UID, "hi", NOW + timedelta(days=5))
+    assert re.search(r"#\d+: Never use Latin or Greek roots", llm.prompts[-1])
+
+    # The book reader's explanations get it too.
+    systems = []
+
+    class Spy(FakeLLM):
+        async def run(self, system, prompt, tools, must_use_tool=False):
+            systems.append(system)
+            return "deep (adjective)\nGoing far down.\nPicture: deep pool"
+
+    reader = Agent(store, Spy())
+    await reader.explain_word(UID, "deep", "They swam in the deep pool.")
+    assert "Never use Latin or Greek roots" in systems[-1]
+
+    async def drop(prompt, t):
+        rid = int(re.search(r"#(\d+): Never use Latin", prompt).group(1))
+        assert await t["remove_rule"]({"rule_id": rid}) == "Removed."
+        return "Okay, Latin is back on the table."
+
+    llm.script.append(drop)
+    await agent.on_user_message(UID, "actually Latin roots are fine now", NOW + timedelta(days=6))
+    assert store.rules(UID) == []
+
+
+async def test_rules_command_lists_and_removes(store):
+    app = App(Config("t", frozenset({UID}), None, "UTC", "fake", None, "INFO"), store, Agent(store, FakeLLM()), None)
+    text, kb = app._rules_menu(UID)
+    assert text.startswith("No rules yet") and kb is None
+    rid = store.add_rule(UID, "Always give a synonym.", NOW)
+    text, kb = app._rules_menu(UID)
+    assert "1. Always give a synonym." in text
+    assert kb.inline_keyboard[0][0].callback_data == f"rule:{rid}"

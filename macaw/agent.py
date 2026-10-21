@@ -132,6 +132,7 @@ MAX_MESSAGE_CHARS = 500
 DUE_LIST_LIMIT = 15
 REVIEWS_SHOWN = 4  # latest reviews listed on a card's 'Last studied' line
 MAX_USER_NOTES = 20
+MAX_USER_RULES = 30
 # Arguing against giving up a day only makes sense with a good part of it still ahead.
 PUSHBACK_MIN_LEFT = timedelta(hours=3)
 # At most this much of the time spent answering a round comes off the wait before the next.
@@ -339,7 +340,7 @@ class Agent:
         """What a word (or a selected phrase) in the book reader means in that very sentence.
         One call, no tools. Returns the explanation and a search phrase for a photo ("" for none)."""
         reply = strip_emoji(await self._reader_llm(user_id).run(
-            EXPLAIN_PROMPT, self._passage(word, sentence, context, book), []))
+            self._with_rules(EXPLAIN_PROMPT, user_id), self._passage(word, sentence, context, book), []))
         lines, picture = [], ""
         for line in reply.splitlines():
             m = PICTURE_LINE.match(line.strip())
@@ -360,7 +361,7 @@ class Agent:
         for q, a in history:
             prompt += f"\n\nThey asked: {q}\nYou answered: {a}"
         prompt += f"\n\nTheir question now: {question}"
-        reply = strip_emoji(await self._reader_llm(user_id).run(ASK_PROMPT, prompt, []))
+        reply = strip_emoji(await self._reader_llm(user_id).run(self._with_rules(ASK_PROMPT, user_id), prompt, []))
         text = "\n".join(line.strip() for line in reply.splitlines()).strip()
         if not text:
             raise LLMError("the model gave an empty answer")
@@ -620,6 +621,25 @@ class Agent:
         return ["YOUR NOTES ABOUT THE USER (written by you on earlier talks; they hold until you remove them):"] + [
             f"  #{n['id']} (written {parse(n['created_at']).astimezone(tz):%a %d %b}): {n['text']}" for n in notes
         ]
+
+    def _rules_lines(self, turn: Turn) -> list[str]:
+        """How the user told the bot to behave, kept until they take it back."""
+        rules = self.store.rules(turn.user["id"])
+        if not rules:
+            return ["THE USER'S STANDING RULES: none yet (save_rule keeps one when they ask you to always or "
+                    "never do something)."]
+        return ["THE USER'S STANDING RULES (they asked for these; follow every one in every message, over any "
+                "default in your instructions, until they take it back):"] + [
+            f"  #{r['id']}: {r['text']}" for r in rules
+        ]
+
+    def _with_rules(self, system: str, user_id: int) -> str:
+        """The reader's prompts get the user's standing rules too."""
+        rules = self.store.rules(user_id)
+        if not rules:
+            return system
+        return system + "\nThe user's standing rules (always follow them):\n" + "\n".join(
+            f"- {r['text']}" for r in rules) + "\n"
 
     def _ignored_lines(self, turn: Turn, st: Any) -> list[str]:
         """How long cards have gone undone, so a reply after days of silence lands right."""
@@ -881,6 +901,7 @@ class Agent:
         lines.append(self._today_line(turn))
         lines.extend(plan.report(self.store, u, now, plan.build(self.store, u, now)))
         lines.extend(self._notes_lines(turn))
+        lines.extend(self._rules_lines(turn))
         lines.append(self._timer_line(turn, st, bool(active and self.store.card(active)), queue))
         lines.extend(self._ignored_lines(turn, st))
 
@@ -1160,8 +1181,8 @@ class Agent:
                     f"Graded {srs.RATING_NAMES[rating]}. {back} This card has fallen short before "
                     f"(earlier: {earlier}; now: {missed}). Don't move on quickly this time. Kindly say "
                     "this part keeps slipping, explain it clearly by contrasting it with what they said, "
-                    "add one short memory hook (like the word's origin or a vivid contrast; no example "
-                    "sentences), then ask them to put the full meaning in their own words. Do NOT ask "
+                    "add one short memory hook in plain English (a vivid picture, a sound-alike or a contrast "
+                    "with a word they know; no Latin, Greek or other foreign roots, no example sentences), then ask them to put the full meaning in their own words. Do NOT ask "
                     "another card in this message; the code brings the next one up after they reply. "
                     "Their reply is not graded: confirm it or gently fill what's still missing."
                 )
@@ -1375,6 +1396,24 @@ class Agent:
         async def remove_note(args):
             if not store.delete_memory_note(uid, int(args["note_id"])):
                 raise ValueError(f"No note #{args['note_id']}")
+            return "Removed."
+
+        async def save_rule(args):
+            text = strip_emoji(str(args.get("text") or "")).strip()
+            if not text:
+                raise ValueError("Write the rule in text.")
+            if any(r["text"].lower() == text.lower() for r in store.rules(uid)):
+                return "Already saved as a rule."
+            if len(store.rules(uid)) >= MAX_USER_RULES:
+                return ("Not saved: there are already too many rules. Ask the user which one to drop "
+                        "(they can also remove them with /rules).")
+            rid = store.add_rule(uid, text[:300], turn.now)
+            return (f"Saved as rule #{rid}. It is in your context on every later message until the user takes it "
+                    "back. Tell them in a few words that you'll keep to it from now on.")
+
+        async def remove_rule(args):
+            if not store.delete_rule(uid, int(args["rule_id"])):
+                raise ValueError(f"No rule #{args['rule_id']}")
             return "Removed."
 
         async def give_space(args):
@@ -1636,6 +1675,22 @@ class Agent:
                 "changed their mind) or was wrong.",
                 _jsonschema({"note_id": INT}, ["note_id"]),
                 remove_note,
+            ),
+            ToolSpec(
+                "save_rule",
+                "The user tells you to stop or start doing something in how you teach or talk, for good, not "
+                "just right now ('stop giving Latin roots', 'always give a synonym', 'don't call me buddy'). "
+                "Write it as one plain instruction to yourself, with the reason if they gave one. Not for "
+                "facts about their life or plans (save_note) or settings like timezone and round size.",
+                _jsonschema({"text": STR}, ["text"]),
+                save_rule,
+            ),
+            ToolSpec(
+                "remove_rule",
+                "Remove one of THE USER'S STANDING RULES when they take it back or change it (then save the "
+                "new version with save_rule).",
+                _jsonschema({"rule_id": INT}, ["rule_id"]),
+                remove_rule,
             ),
             ToolSpec(
                 "give_space",

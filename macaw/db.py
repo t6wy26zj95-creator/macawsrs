@@ -176,6 +176,15 @@ CREATE TABLE IF NOT EXISTS user_notes (
     created_at  TEXT NOT NULL
 );
 
+-- How the user wants the bot to behave, in their own words: "never use Latin roots", "always
+-- give the part of speech". Saved when they ask; sent with every prompt until they remove it.
+CREATE TABLE IF NOT EXISTS user_rules (
+    id          INTEGER PRIMARY KEY,
+    user_id     INTEGER NOT NULL,
+    text        TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS invites (
     code        TEXT PRIMARY KEY,
     created_by  INTEGER NOT NULL,
@@ -381,6 +390,19 @@ class Store:
 
     def delete_memory_note(self, user_id: int, note_id: int) -> bool:
         cur = self.conn.execute("DELETE FROM user_notes WHERE user_id=? AND id=?", (user_id, note_id))
+        return cur.rowcount > 0
+
+    def rules(self, user_id: int) -> list[sqlite3.Row]:
+        return self.q("SELECT * FROM user_rules WHERE user_id=? ORDER BY id", (user_id,))
+
+    def add_rule(self, user_id: int, text: str, at: datetime) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO user_rules(user_id, text, created_at) VALUES (?,?,?)", (user_id, text, iso(at))
+        )
+        return int(cur.lastrowid)
+
+    def delete_rule(self, user_id: int, rule_id: int) -> bool:
+        cur = self.conn.execute("DELETE FROM user_rules WHERE user_id=? AND id=?", (user_id, rule_id))
         return cur.rowcount > 0
 
     def day_plan(self, user_id: int, day: str) -> sqlite3.Row | None:
