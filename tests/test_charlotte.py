@@ -99,15 +99,21 @@ def test_clean_speech():
 
 
 async def test_server_owner_only(store, tmp_path):
+    import aiohttp
     from aiohttp.test_utils import TestClient, TestServer
 
     from macaw.reader import server as reader
 
     store.ensure_user(7, 7, "UTC")
     agent = Agent(store, FakeLLM())
+
+    async def fake_transcribe(audio, name):
+        return "" if audio == b"silence" else "hello Charlotte"
+
     her = FakeLLM()
     srv = reader.ReaderServer("tok", lambda uid: uid in (UID, 7), reader.Library(store, tmp_path), store,
-                              charlotte=Charlotte(store, agent, her), owners=frozenset({UID}))
+                              charlotte=Charlotte(store, agent, her), owners=frozenset({UID}),
+                              transcribe=fake_transcribe)
     c = TestClient(TestServer(srv.build()))
     await c.start_server()
     try:
@@ -126,5 +132,21 @@ async def test_server_owner_only(store, tmp_path):
         assert (await r.json())["say"] == "Hello, witcher."
         r = await c.post("/api/charlotte/event", headers=key, json={"event": "nope"})
         assert r.status == 400
+
+        async def reply(prompt, t):
+            assert "Geralt: hello Charlotte" in prompt and "region: Skellige" in prompt
+            return "Hello again."
+
+        her.script.append(reply)
+        form = aiohttp.FormData()
+        form.add_field("audio", b"RIFFxxxx", filename="a.wav")
+        form.add_field("game", '{"region": "Skellige"}')
+        r = await c.post("/api/charlotte/hear", headers=key, data=form)
+        assert await r.json() == {"say": "Hello again.", "action": "stay", "journal_saved": False,
+                                  "graded": [], "heard": "hello Charlotte"}
+        form = aiohttp.FormData()
+        form.add_field("audio", b"silence", filename="a.wav")
+        r = await c.post("/api/charlotte/hear", headers=key, data=form)
+        assert (await r.json())["heard"] == ""
     finally:
         await c.close()

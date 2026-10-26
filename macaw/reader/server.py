@@ -120,7 +120,7 @@ def read_token(bot_token: str, token: str, now: float | None = None) -> int | No
 
 class ReaderServer:
     def __init__(self, bot_token: str, allowed, library: Library, store: Store, explain=None, add_word=None, ask=None,
-                 find_pictures=pictures.find, charlotte=None, owners: frozenset[int] = frozenset()):
+                 find_pictures=pictures.find, charlotte=None, owners: frozenset[int] = frozenset(), transcribe=None):
         self.bot_token = bot_token
         self.allowed = allowed  # callable: user id -> bool
         self.library = library
@@ -133,6 +133,7 @@ class ReaderServer:
         self.find_pictures = find_pictures
         self.charlotte = charlotte  # the Witcher 3 companion (macaw.charlotte.Charlotte); owners only
         self.owners = owners
+        self.transcribe = transcribe  # async (audio bytes, file name) -> text, for Charlotte's ears
         self._explained: dict[tuple, dict] = {}
         self._pictures: dict[str, list] = {}
 
@@ -158,6 +159,7 @@ class ReaderServer:
         r.add_get("/api/pictures", self.pictures)
         r.add_get("/api/charlotte/status", self.charlotte_status)
         r.add_post("/api/charlotte/event", self.charlotte_event)
+        r.add_post("/api/charlotte/hear", self.charlotte_hear)
         return app
 
     @web.middleware
@@ -393,9 +395,35 @@ class ReaderServer:
         body = await request.json()
         kind = str(body.get("event") or "")
         said = str(body.get("said") or "")
-        game = body.get("game") if isinstance(body.get("game"), dict) else {}
-        if len(json.dumps(game)) > CHARLOTTE_GAME_MAX:
-            raise web.HTTPBadRequest(text="Game info too long.")
+        return await self._charlotte_turn(uid, kind, said, _game_info(body.get("game")))
+
+    async def charlotte_hear(self, request: web.Request) -> web.Response:
+        """What he said, as audio from the PC mic: turned into text here (the bot's Whisper key), then her reply."""
+        uid = _charlotte_user(self, request)
+        if self.transcribe is None:
+            return web.json_response({"error": "Speech-to-text isn't set up on the bot (no Groq key)."}, status=503)
+        audio, game = b"", {}
+        async for part in await request.multipart():
+            if part.name == "audio":
+                audio = await part.read()
+            elif part.name == "game":
+                with contextlib.suppress(ValueError):
+                    game = json.loads(await part.text())
+        if not audio or len(audio) > CHARLOTTE_AUDIO_MAX:
+            raise web.HTTPBadRequest(text="No audio, or too long.")
+        try:
+            heard = await self.transcribe(audio, "speech.wav")
+        except Exception as e:
+            log.warning("charlotte: speech-to-text failed: %s", e)
+            return web.json_response({"say": "", "heard": "", "error": "hearing"})
+        if not heard:
+            return web.json_response({"say": "", "heard": ""})
+        resp = await self._charlotte_turn(uid, "speech", heard, _game_info(game))
+        data = json.loads(resp.text)
+        data["heard"] = heard
+        return web.json_response(data)
+
+    async def _charlotte_turn(self, uid: int, kind: str, said: str, game: dict) -> web.Response:
         try:
             result = await self.charlotte.event(uid, kind, said, game)
         except ValueError as e:
@@ -415,7 +443,15 @@ class ReaderServer:
         return web.json_response({"ok": True})
 
 
-CHARLOTTE_GAME_MAX = 2000
+CHARLOTTE_GAME_MAX = 3000
+CHARLOTTE_AUDIO_MAX = 4 * 1024 * 1024  # about two minutes of 16 kHz mono WAV
+
+
+def _game_info(raw) -> dict:
+    game = raw if isinstance(raw, dict) else {}
+    if len(json.dumps(game)) > CHARLOTTE_GAME_MAX:
+        raise web.HTTPBadRequest(text="Game info too long.")
+    return game
 
 
 def _charlotte_user(server: "ReaderServer", request: web.Request) -> int:

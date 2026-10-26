@@ -1,22 +1,337 @@
-// Charlotte mod, step 1: a test that proves mods load on this game.
-// About 15 seconds after a save loads, a short note appears on screen.
+// Charlotte: a companion who finds Geralt at calm moments, talks with him by voice and walks with him.
+//
+// The talking happens outside the game: a helper program on the PC listens to the mic, asks the bot what
+// she says and plays her voice. It reaches the game through the script debug channel (the game started
+// with -net -debugscripts) and calls the chl_* exec functions below. Each one answers with Log() lines
+// tagged "[MCW#<seq>]" and a final "[MCW#<seq>] end", the format the helper's network client expects.
+
+// ---------------- state, kept on the player ----------------
+
+@addField(CR4Player) var chlNpc : CNewNPC;
+@addField(CR4Player) var chlFollowId : int;
+@addField(CR4Player) var chlLeaving : bool;
+@addField(CR4Player) var chlLeftAt : float;
+@addField(CR4Player) var chlSpawnedAt : float;
+@addField(CR4Player) var chlCalmSince : float;
 
 @wrapMethod(CR4Player) function OnSpawned( spawnData : SEntitySpawnData )
 {
 	var result : bool;
 
 	result = wrappedMethod( spawnData );
-	AddTimer( 'CharlotteHello', 15.0, false );
+	AddTag( 'chl_geralt' );
+	AddTimer( 'CHL_Tick', 1.0, true );
 	return result;
 }
 
-@addMethod(CR4Player) timer function CharlotteHello( dt : float, id : int )
+// ---------------- helpers ----------------
+
+function CHL_Line( seq : int, text : string )
 {
-	theGame.GetGuiManager().ShowNotification( "Charlotte: Hello, Geralt. The mod is working." );
+	Log( "[MCW#" + IntToString( seq ) + "] " + text );
 }
 
-// The same note on demand, from the debug console: charlotte_hello()
-exec function charlotte_hello()
+function CHL_End( seq : int )
 {
-	theGame.GetGuiManager().ShowNotification( "Charlotte: Hello, Geralt. The mod is working." );
+	Log( "[MCW#" + IntToString( seq ) + "] end" );
+}
+
+function CHL_B( b : bool ) : string
+{
+	if ( b )
+		return "1";
+	return "0";
+}
+
+// She is in the world and not on her way out.
+function CHL_Here() : bool
+{
+	if ( thePlayer.chlNpc )
+		return !thePlayer.chlLeaving;
+	return false;
+}
+
+function CHL_Now() : float
+{
+	return theGame.GetEngineTimeAsSeconds();
+}
+
+// Something that must never be interrupted: a fight, enemies about, a conversation or a cutscene.
+function CHL_Danger() : bool
+{
+	return thePlayer.IsInCombat() || thePlayer.IsThreatened() || theGame.IsDialogOrCutscenePlaying()
+		|| thePlayer.IsInNonGameplayCutscene() || theGame.IsCurrentlyPlayingNonGameplayScene();
+}
+
+// Not dangerous, but not a moment for a visit either.
+function CHL_Busy() : string
+{
+	if ( theGame.GetGuiManager().IsAnyMenu() ) return "menu";
+	if ( theGame.IsPaused() ) return "paused";
+	if ( theGame.IsBlackscreen() || theGame.IsFading() ) return "fading";
+	if ( thePlayer.IsSwimming() || thePlayer.IsDiving() ) return "water";
+	if ( thePlayer.IsInAir() ) return "air";
+	if ( thePlayer.IsUsingVehicle() ) return "riding";
+	if ( thePlayer.IsInFistFightMiniGame() ) return "fistfight";
+	if ( thePlayer.IsInInterior() ) return "inside";
+	return "";
+}
+
+function CHL_Weather() : string
+{
+	switch ( GetCurWeather() )
+	{
+		case EWE_Clear: return "clear";
+		case EWE_Rain: return "rain";
+		case EWE_Snow: return "snow";
+		case EWE_Storm: return "storm";
+	}
+	return "cloudy";
+}
+
+function CHL_Ground( pos : Vector ) : Vector
+{
+	var hit, normal : Vector;
+
+	if ( theGame.GetWorld().StaticTrace( pos + Vector( 0, 0, 5 ), pos - Vector( 0, 0, 5 ), hit, normal ) )
+		return hit;
+	return pos;
+}
+
+function CHL_StopFollowing()
+{
+	if ( thePlayer.chlNpc && thePlayer.chlFollowId != 0 )
+	{
+		thePlayer.chlNpc.CancelAIBehavior( thePlayer.chlFollowId );
+	}
+	thePlayer.chlFollowId = 0;
+}
+
+function CHL_Remove()
+{
+	CHL_StopFollowing();
+	if ( thePlayer.chlNpc )
+	{
+		thePlayer.chlNpc.Destroy();
+	}
+	thePlayer.chlNpc = NULL;
+	thePlayer.chlLeaving = false;
+}
+
+// ---------------- the once-a-second check ----------------
+
+@addMethod(CR4Player) timer function CHL_Tick( dt : float, id : int )
+{
+	var dist : float;
+
+	if ( CHL_Danger() || CHL_Busy() != "" )
+		chlCalmSince = 0;
+	else if ( chlCalmSince == 0 )
+		chlCalmSince = CHL_Now();
+
+	if ( !chlNpc )
+		return;
+	dist = VecDistance( chlNpc.GetWorldPosition(), GetWorldPosition() );
+	if ( chlLeaving )
+	{
+		// Out of sight, or walking away for long enough: gone.
+		if ( dist > 35 || CHL_Now() - chlLeftAt > 30 )
+			CHL_Remove();
+		return;
+	}
+	if ( dist > 60 && chlFollowId != 0 )
+	{
+		// Left far behind (fast travel, a gallop): she catches up out of view.
+		chlNpc.Teleport( CHL_Ground( GetWorldPosition() - theCamera.GetCameraDirection() * 8.0 ) );
+	}
+}
+
+// ---------------- what the helper calls ----------------
+
+// The state of things, every second or so. full=1 adds the quest lines.
+exec function chl_poll( seq : int, optional full : int )
+{
+	var calmFor : int;
+	var near : int;
+	var busy : string;
+	var journal : CWitcherJournalManager;
+	var quest : CJournalQuest;
+	var goal : CJournalQuestObjective;
+
+	busy = CHL_Busy();
+	calmFor = 0;
+	if ( thePlayer.chlCalmSince > 0 )
+		calmFor = FloorF( CHL_Now() - thePlayer.chlCalmSince );
+	near = -1;
+	if ( thePlayer.chlNpc )
+		near = FloorF( VecDistance( thePlayer.chlNpc.GetWorldPosition(), thePlayer.GetWorldPosition() ) * 10 );
+
+	CHL_Line( seq, "st calmfor " + IntToString( calmFor ) + " danger " + CHL_B( CHL_Danger() )
+		+ " settle " + CHL_B( thePlayer.IsInSettlement() ) + " level " + IntToString( GetWitcherPlayer().GetLevel() )
+		+ " coin " + IntToString( thePlayer.GetInventory().GetMoney() )
+		+ " hour " + IntToString( GameTimeHours( theGame.GetGameTime() ) )
+		+ " her " + CHL_B( CHL_Here() ) + " near10 " + IntToString( near )
+		+ " follow " + CHL_B( thePlayer.chlFollowId != 0 ) );
+	CHL_Line( seq, "busy " + busy );
+	CHL_Line( seq, "area " + NameToString( theGame.GetCommonMapManager().GetCurrentJournalAreaByPosition( thePlayer.GetWorldPosition() ) ) );
+	CHL_Line( seq, "weather " + CHL_Weather() );
+	if ( full == 1 )
+	{
+		journal = theGame.GetJournalManager();
+		quest = journal.GetTrackedQuest();
+		if ( quest )
+			CHL_Line( seq, "quest " + GetLocStringById( quest.GetTitleStringId() ) );
+		goal = journal.GetHighlightedObjective();
+		if ( goal )
+			CHL_Line( seq, "goal " + GetLocStringById( goal.GetTitleStringId() ) );
+	}
+	CHL_End( seq );
+}
+
+// Story quests already finished (so she doesn't spoil the rest), a page at a time.
+exec function chl_story( seq : int, offset : int )
+{
+	var journal : CWitcherJournalManager;
+	var entries : array<CJournalBase>;
+	var quest : CJournalQuest;
+	var i, found, shown : int;
+	var kind : int;
+
+	journal = theGame.GetJournalManager();
+	journal.GetActivatedOfType( 'CJournalQuest', entries );
+	found = 0;
+	shown = 0;
+	for ( i = 0; i < entries.Size(); i += 1 )
+	{
+		quest = (CJournalQuest)entries[i];
+		if ( !quest || journal.GetEntryStatus( quest ) != JS_Success )
+			continue;
+		kind = quest.GetType();
+		if ( kind != 0 && kind != 1 && kind != 6 && kind != 7 )
+			continue;
+		if ( found >= offset && shown < 12 )
+		{
+			CHL_Line( seq, "done " + GetLocStringById( quest.GetTitleStringId() ) );
+			shown += 1;
+		}
+		found += 1;
+	}
+	CHL_Line( seq, "total " + IntToString( found ) );
+	CHL_End( seq );
+}
+
+// She appears out of sight behind Geralt and walks up to him. template = a resource alias, e.g. "sorceress".
+exec function chl_spawn( seq : int, template : string )
+{
+	var res : CEntityTemplate;
+	var pos : Vector;
+	var rot : EulerAngles;
+	var ent : CEntity;
+
+	if ( thePlayer.chlNpc )
+		CHL_Remove();
+	res = (CEntityTemplate)LoadResource( template );
+	if ( !res )
+	{
+		CHL_Line( seq, "error no-template" );
+		CHL_End( seq );
+		return;
+	}
+	pos = CHL_Ground( thePlayer.GetWorldPosition() - theCamera.GetCameraDirection() * 18.0 );
+	rot = thePlayer.GetWorldRotation();
+	ent = theGame.CreateEntity( res, pos, rot );
+	thePlayer.chlNpc = (CNewNPC)ent;
+	if ( !thePlayer.chlNpc )
+	{
+		if ( ent )
+			ent.Destroy();
+		CHL_Line( seq, "error not-an-npc" );
+		CHL_End( seq );
+		return;
+	}
+	thePlayer.chlNpc.AddTag( 'chl_charlotte' );
+	thePlayer.chlNpc.SetTemporaryAttitudeGroup( 'friendly_to_player', AGP_Default );
+	thePlayer.chlNpc.SetImmortalityMode( AIM_Invulnerable, AIC_Default );
+	thePlayer.chlLeaving = false;
+	thePlayer.chlFollowId = 0;
+	thePlayer.chlSpawnedAt = CHL_Now();
+	thePlayer.chlNpc.ActionMoveToDynamicNodeAsync( thePlayer, MT_Walk, 1.0, 2.2 );
+	CHL_Line( seq, "spawned 1" );
+	CHL_End( seq );
+}
+
+// Once she is close: stand and face him, eyes on him.
+exec function chl_face( seq : int )
+{
+	if ( thePlayer.chlNpc )
+	{
+		thePlayer.chlNpc.ActionRotateToAsync( thePlayer.GetWorldPosition() );
+		thePlayer.chlNpc.EnableDynamicLookAt( thePlayer, 600 );
+	}
+	CHL_End( seq );
+}
+
+// If she got stuck on the way: put her a few steps behind him.
+exec function chl_closer( seq : int )
+{
+	if ( thePlayer.chlNpc )
+	{
+		thePlayer.chlNpc.Teleport( CHL_Ground( thePlayer.GetWorldPosition() - theCamera.GetCameraDirection() * 5.0 ) );
+		thePlayer.chlNpc.ActionMoveToDynamicNodeAsync( thePlayer, MT_Walk, 1.0, 2.2 );
+	}
+	CHL_End( seq );
+}
+
+// What she does next: stay | follow | wait | leave | vanish (gone at once, for cutscenes and fights).
+exec function chl_action( seq : int, action : string )
+{
+	var ai : CAIFollowSideBySideAction;
+
+	if ( !thePlayer.chlNpc )
+	{
+		CHL_Line( seq, "error no-charlotte" );
+		CHL_End( seq );
+		return;
+	}
+	if ( action == "follow" )
+	{
+		CHL_StopFollowing();
+		ai = new CAIFollowSideBySideAction in thePlayer.chlNpc;
+		ai.OnCreated();
+		ai.params.targetTag = 'chl_geralt';
+		thePlayer.chlFollowId = thePlayer.chlNpc.ForceAIBehavior( ai, BTAP_Emergency );
+	}
+	else if ( action == "wait" || action == "stay" )
+	{
+		CHL_StopFollowing();
+		thePlayer.chlNpc.ActionCancelAll();
+		thePlayer.chlNpc.ActionRotateToAsync( thePlayer.GetWorldPosition() );
+	}
+	else if ( action == "leave" )
+	{
+		CHL_StopFollowing();
+		thePlayer.chlNpc.DisableLookAt();
+		thePlayer.chlNpc.ActionMoveAwayFromNodeAsync( thePlayer, 40, MT_Walk );
+		thePlayer.chlLeaving = true;
+		thePlayer.chlLeftAt = CHL_Now();
+	}
+	else if ( action == "vanish" )
+	{
+		CHL_Remove();
+	}
+	CHL_Line( seq, "ok " + action );
+	CHL_End( seq );
+}
+
+// A short note in the corner (mic on or off, the helper's own messages).
+exec function chl_note( seq : int, text : string )
+{
+	theGame.GetGuiManager().ShowNotification( text );
+	CHL_End( seq );
+}
+
+exec function chl_ping( seq : int )
+{
+	CHL_Line( seq, "pong charlotte 1" );
+	CHL_End( seq );
 }

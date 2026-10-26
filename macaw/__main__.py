@@ -71,7 +71,8 @@ async def main() -> None:
                             explain=app.explain_word, add_word=app.add_book_word,
                             ask=app.ask_about_word,
                             charlotte=Charlotte(store, agent, claude, os.environ.get("CHARLOTTE_MODEL") or "sonnet"),
-                            owners=config.owner_ids),
+                            owners=config.owner_ids,
+                            transcribe=app.transcriber.transcribe if app.transcriber else None),
         "127.0.0.1",
         config.reader_port,
     )

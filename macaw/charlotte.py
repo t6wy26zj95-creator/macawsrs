@@ -23,7 +23,7 @@ from .llm import CLAUDE_MODELS, ClaudeOptions, LLMProvider, ToolSpec, claude_opt
 log = logging.getLogger(__name__)
 
 ACTIONS = ("stay", "follow", "wait", "leave")
-EVENTS = ("first_meeting", "arrive", "speech", "mic_off", "mic_on", "interrupted")
+EVENTS = ("first_meeting", "arrive", "speech", "mic_off", "mic_on", "interrupted", "walked_away", "silence")
 JOURNAL_SHOWN = 12
 MEETING_LINES = 40  # what was said in the current meeting, kept for her context
 SAID_MAX = 600
@@ -107,6 +107,15 @@ EVENT_TEXT = {
         "about it if it fits, then wait. If a card is open, leave it open."
     ),
     "mic_on": "Geralt switched his microphone back on. A short line at most.",
+    "walked_away": (
+        "Geralt walked off and left you standing without a word. Call write_journal with your entry for this "
+        "meeting (you may note, dryly, that he wandered off) and set_action with leave. Your reply is not heard; "
+        "one word."
+    ),
+    "silence": (
+        "Geralt has been quiet for a while. If it fits, say one short thing (a remark about the place, a "
+        "question, or the next word if cards are due and he seemed up for it); otherwise reply with nothing."
+    ),
     "interrupted": (
         "Something happened in the game (a fight, a cutscene or a quest) and you had to slip away at once. "
         "Call write_journal with your entry for this meeting and set_action with leave. Your reply is not "
@@ -189,6 +198,8 @@ class Charlotte:
         claude_options.set(ClaudeOptions(model=self.model, effort="low"))
         reply = await self.claude.run(SYSTEM_PROMPT, prompt, self._tools(uid, turn, meeting, result))
         result.say = clean_speech(reply)
+        if result.say.strip("().… ").lower() in ("", "nothing", "silence", "no reply"):
+            result.say = ""
         if result.say:
             meeting.lines.append(f"Charlotte: {result.say}")
         del meeting.lines[:-MEETING_LINES]
