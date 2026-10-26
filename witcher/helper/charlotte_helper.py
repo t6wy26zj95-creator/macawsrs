@@ -243,6 +243,10 @@ class Helper:
         self.poll()
         f = self.fields
         now = time.time()
+        if f.get("ingame") == "0":  # main menu or loading
+            self.state = IDLE
+            self.ears.enabled = False
+            return
         if self.state == IDLE:
             if now - self.status_at > 180:
                 s = self.bot.status()
@@ -316,6 +320,7 @@ class Helper:
             print(MIC_HELP + "\n(" + self.ears.error + ")")
         last_tick = 0.0
         waiting_said = False
+        greeted = False
         while True:
             if self.mute.pressed():
                 self.toggle_mute()
@@ -329,8 +334,11 @@ class Helper:
                     self.tick()
                     if waiting_said:
                         print("Connected to the game. Charlotte will find you at a calm moment in a town.")
-                        self.call("chl_note", "Charlotte is in the world")
                         waiting_said = False
+                        greeted = False
+                    if not greeted and self.fields.get("ingame") == "1":
+                        self.call("chl_note", "Charlotte is in the world")
+                        greeted = True
                 except GameNotRunning:
                     if not waiting_said:
                         print("Waiting for the game...")

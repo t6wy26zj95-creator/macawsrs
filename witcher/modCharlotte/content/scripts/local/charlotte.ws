@@ -164,6 +164,13 @@ exec function chl_poll( seq : int, optional full : int )
 	var tracked : CJournalQuest;
 	var goal : CJournalQuestObjective;
 
+	// Main menu or a loading screen: no player to ask about yet.
+	if ( !thePlayer || !GetWitcherPlayer() || !theGame.GetCommonMapManager() || !theGame.GetGuiManager() )
+	{
+		CHL_Line( seq, "st ingame 0 calmfor 0 danger 1 her 0 follow 0" );
+		CHL_End( seq );
+		return;
+	}
 	busy = CHL_Busy();
 	calmFor = 0;
 	if ( thePlayer.chlCalmSince > 0 )
@@ -172,7 +179,7 @@ exec function chl_poll( seq : int, optional full : int )
 	if ( thePlayer.chlNpc )
 		near = FloorF( VecDistance( thePlayer.chlNpc.GetWorldPosition(), thePlayer.GetWorldPosition() ) * 10 );
 
-	CHL_Line( seq, "st calmfor " + IntToString( calmFor ) + " danger " + CHL_B( CHL_Danger() )
+	CHL_Line( seq, "st ingame 1 calmfor " + IntToString( calmFor ) + " danger " + CHL_B( CHL_Danger() )
 		+ " settle " + CHL_B( thePlayer.IsInSettlement() ) + " level " + IntToString( GetWitcherPlayer().GetLevel() )
 		+ " coin " + IntToString( thePlayer.GetInventory().GetMoney() )
 		+ " hour " + IntToString( GameTimeHours( theGame.GetGameTime() ) )
