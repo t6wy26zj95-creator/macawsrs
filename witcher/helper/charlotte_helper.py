@@ -29,7 +29,9 @@ log = logging.getLogger("charlotte")
 
 DEFAULTS = {
     "bot": {"code": ""},
-    "game": {"folder": r"C:\games\The Witcher 3 Wild Hunt GOTY", "start_game": "yes", "look": "sorceress"},
+    "game": {"folder": r"C:\games\The Witcher 3 Wild Hunt GOTY", "start_game": "yes",
+             # who she looks like: an elegant lady; "appearance" keeps the same face every visit (saved on the first)
+             "look": "rich_woman", "appearance": ""},
     "voice": {"voice": "en-GB-SoniaNeural", "speed": "+0%", "swap_sides": "no"},
     "mute": {"combo": "LEFT_STICK+RIGHT_STICK", "key": "F9"},
     "timing": {"calm_seconds": "120", "minutes_between": "25", "quiet_nudge_seconds": "120"},
@@ -48,6 +50,9 @@ def load_config() -> configparser.ConfigParser:
     cfg = configparser.ConfigParser(interpolation=None)
     cfg.read_dict(DEFAULTS)
     cfg.read(CONFIG, encoding="utf-8")
+    if cfg["game"]["look"] == "sorceress":  # the first version's look, which turned out to be Yennefer
+        cfg["game"]["look"] = DEFAULTS["game"]["look"]
+        cfg["game"]["appearance"] = ""
     return cfg
 
 
@@ -73,6 +78,9 @@ class Bot:
             req.add_header("Content-Type", ctype)
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
+
+    def ready(self) -> dict:
+        return self._send("ready", b"{}", timeout=20)
 
     def status(self) -> dict:
         return self._send("status", timeout=20)
@@ -187,7 +195,7 @@ class Helper:
             except Exception:
                 log.exception("job failed")
 
-    def answer(self, reply: dict) -> None:
+    def answer(self, reply: dict, got: float | None = None) -> None:
         """Speaks her reply and does what she decided."""
         say = (reply.get("say") or "").strip()
         waited = 0.0
@@ -198,7 +206,8 @@ class Helper:
             log.info("Charlotte: %s", say)
             self.ears.paused = True
             try:
-                self.voice.say(say, self.where_she_is)
+                self.voice.say(say, self.where_she_is,
+                               on_start=lambda: got and log.info("(voice ready after %.1fs more)", time.monotonic() - got))
             finally:
                 self.ears.paused = False
         action = reply.get("action") or "stay"
@@ -210,6 +219,19 @@ class Helper:
             log.warning("couldn't tell the game %s: %s", action, e)
         if action == "leave":
             self.end_visit()
+
+    def keep_face(self) -> None:
+        """The same face every visit: remember the first one she had, put it back on later visits."""
+        saved = self.cfg["game"]["appearance"]
+        if saved:
+            self.call("chl_look", saved)
+            return
+        fields = parse_fields(self.call("chl_where"))
+        look = fields.get("where", "").partition(" look ")[2].split(" visible")[0].strip()
+        if look:
+            self.cfg["game"]["appearance"] = look
+            save_config(self.cfg)
+            log.info("her look from now on: %s", look)
 
     def where_she_is(self) -> tuple[float, float]:
         left, right = place_voice(self.fields.get("ear", ""))
@@ -229,14 +251,19 @@ class Helper:
     def on_speech(self, wav: bytes) -> None:
         if self.state != TALK or self.muted:
             return
+        stopped = time.monotonic()  # you just stopped talking
         self.last_heard = time.time()
         self.nudged = False
 
         def job():
             reply = self.bot.hear(wav, self.game_info())
+            got = time.monotonic()
             if reply.get("heard"):
                 log.info("You: %s", reply["heard"])
-            self.answer(reply)
+            t = reply.get("timing") or {}
+            log.info("(reply after %.1fs: hearing %ss, thinking %ss, the rest is the connection)",
+                     got - stopped, t.get("hearing", "?"), t.get("thinking", "?"))
+            self.answer(reply, got)
 
         self.jobs.put(job)
 
@@ -293,6 +320,8 @@ class Helper:
                     log.warning("Charlotte couldn't appear: %s", lines)
                     self.next_visit = now + 300
                     return
+                self.jobs.put(self.bot.ready)  # her brain gets ready while she walks up
+                self.keep_face()
                 log.info("Charlotte is on her way: %s", " ".join(self.call("chl_where")))
                 self.state, self.spawned_at = APPROACH, now
             return

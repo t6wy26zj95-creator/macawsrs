@@ -250,6 +250,15 @@ exec function chl_story( seq : int, offset : int )
 	CHL_End( seq );
 }
 
+// Looks she can have, by short name (the helper can't send backslashes through the debug channel).
+function CHL_Template( look : string ) : string
+{
+	if ( look == "rich_woman" ) return "gameplay\community\community_npcs\novigrad\regular\novigrad_rich_woman.w2ent";
+	if ( look == "noblewoman" ) return "gameplay\community\community_npcs\novigrad\regular\novigrad_noblewoman.w2ent";
+	if ( look == "sorceress_kob" ) return "quests\part_1\quest_files\q301_dreamer\characters\q301_sorceress_kob.w2ent";
+	return "";
+}
+
 // She appears out of sight behind Geralt and walks up to him. template = a resource alias, e.g. "sorceress".
 exec function chl_spawn( seq : int, template : string )
 {
@@ -260,8 +269,8 @@ exec function chl_spawn( seq : int, template : string )
 
 	if ( thePlayer.chlNpc )
 		CHL_Remove();
-	if ( StrFindFirst( template, ".w2ent" ) >= 0 )
-		res = (CEntityTemplate)LoadResource( template, true );  // a full path to a .w2ent
+	if ( CHL_Template( template ) != "" )
+		res = (CEntityTemplate)LoadResource( CHL_Template( template ), true );
 	else
 		res = (CEntityTemplate)LoadResource( template );  // a short name from the game's list
 	if ( !res )
@@ -371,6 +380,14 @@ function CHL_Pos10( v : Vector ) : string
 function CHL_Pos( v : Vector ) : string
 {
 	return IntToString( FloorF( v.X ) ) + "," + IntToString( FloorF( v.Y ) ) + "," + IntToString( FloorF( v.Z ) );
+}
+
+// Puts back the face she had on her first visit (an appearance name of her template).
+exec function chl_look( seq : int, appearance : string )
+{
+	if ( thePlayer.chlNpc && appearance != "" )
+		thePlayer.chlNpc.ApplyAppearance( appearance );
+	CHL_End( seq );
 }
 
 // Where she is and whether she can be seen, for the log.

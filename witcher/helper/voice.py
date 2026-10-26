@@ -28,7 +28,7 @@ RATE = 16000
 FRAME = 480  # 30 ms
 PRE_ROLL = 10  # frames kept from just before you started talking
 START_FRAMES = 5  # 150 ms of loud sound starts a recording
-END_SILENCE = 0.9  # seconds of quiet that end it
+END_SILENCE = 0.7  # seconds of quiet that end it
 MAX_SECONDS = 30
 MIN_SECONDS = 0.4
 
@@ -195,7 +195,7 @@ class Voice:
         self.folder = tempfile.mkdtemp(prefix="charlotte-")
         self.count = 0
 
-    def say(self, text: str, where=None) -> None:
+    def say(self, text: str, where=None, on_start=None) -> None:
         """Speaks `text` and returns when she's done. `where()` gives (left, right) loudness and is asked
         again while she talks, so her voice follows her as she and the camera move."""
         if not text.strip():
@@ -205,6 +205,8 @@ class Voice:
         self.count += 1
         path = os.path.join(self.folder, f"line{self.count % 5}.mp3")
         asyncio.run(edge_tts.Communicate(text, self.voice, rate=self.rate).save(path))
+        if on_start:
+            on_start()
         try:
             self._play_placed(path, where or (lambda: (0.8, 0.8)))
         except ImportError:

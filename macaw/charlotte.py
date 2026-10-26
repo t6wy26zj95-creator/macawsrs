@@ -179,6 +179,16 @@ class Charlotte:
         due = len(srs.due_queue(self.store, dict(user), now)) if user else 0
         return {"due": due, "met": self.met(uid), "in_meeting": uid in self.meetings}
 
+    async def prepare(self, uid: int) -> None:
+        """She's on her way: get a Claude Code process started so her first line comes quickly."""
+        prepare = getattr(self.claude, "prepare", None)
+        if prepare is None:
+            return
+        claude_options.set(ClaudeOptions(model=self.model, effort="low"))
+        turn = self.agent._turn(uid, datetime.now(timezone.utc))
+        meeting = Meeting(started=turn.now)
+        await prepare(SYSTEM_PROMPT, self._tools(uid, turn, meeting, Result(say="")))
+
     def met(self, uid: int) -> bool:
         return self.store.q1("SELECT 1 FROM charlotte_journal WHERE user_id=? LIMIT 1", (uid,)) is not None
 

@@ -142,8 +142,13 @@ async def test_server_owner_only(store, tmp_path):
         form.add_field("audio", b"RIFFxxxx", filename="a.wav")
         form.add_field("game", '{"region": "Skellige"}')
         r = await c.post("/api/charlotte/hear", headers=key, data=form)
-        assert await r.json() == {"say": "Hello again.", "action": "stay", "journal_saved": False,
-                                  "graded": [], "heard": "hello Charlotte"}
+        data = await r.json()
+        assert set(data.pop("timing")) == {"hearing", "thinking"}
+        assert data == {"say": "Hello again.", "action": "stay", "journal_saved": False,
+                        "graded": [], "heard": "hello Charlotte"}
+        # warming up her brain: the fake model has no prepare(), so it's a no-op that still answers ok
+        assert (await (await c.post("/api/charlotte/ready", headers=key)).json()) == {"ok": True}
+        assert (await c.post("/api/charlotte/ready", headers=guest)).status == 403
         form = aiohttp.FormData()
         form.add_field("audio", b"silence", filename="a.wav")
         r = await c.post("/api/charlotte/hear", headers=key, data=form)
