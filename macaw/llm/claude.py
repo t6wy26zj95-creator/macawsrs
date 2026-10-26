@@ -103,12 +103,13 @@ class ClaudeCodeProvider:
 
     async def _start(self, system: str, tools: list[ToolSpec], opts: ClaudeOptions) -> _Ready:
         ready = _Ready({t.name: t for t in tools})
-        server = create_sdk_mcp_server(name=SERVER, tools=self._sdk_tools(tools, ready))
+        # No tools: no tool server either, so nothing extra starts and the reply is one API call.
+        servers = {SERVER: create_sdk_mcp_server(name=SERVER, tools=self._sdk_tools(tools, ready))} if tools else {}
         model = self._model_for(opts)
         options = ClaudeAgentOptions(
             system_prompt=system,
             tools=[],  # no built-in Claude Code tools (no shell, no files)
-            mcp_servers={SERVER: server},
+            mcp_servers=servers,
             strict_mcp_config=True,
             allowed_tools=[f"mcp__{SERVER}__{t.name}" for t in tools],
             setting_sources=[],
@@ -176,7 +177,7 @@ class ClaudeCodeProvider:
         """Start a waiting Claude Code process for this kind of turn now (with the current
         claude_options), so the first real turn of it doesn't wait for Claude Code to start."""
         opts = claude_options.get()
-        if not opts.warm or not tools:
+        if not opts.warm or not (tools or opts.warm_without_tools):
             return
         key = self._key(system, tools, opts)
         self._kinds.pop(key, None)
@@ -200,7 +201,7 @@ class ClaudeCodeProvider:
         key = self._key(system, tools, opts)
         t0 = time.monotonic()
         ready = self._ready.pop(key, None)
-        if opts.warm and tools:  # chat turns; book lookups (no tools) don't push them out
+        if opts.warm and (tools or opts.warm_without_tools):  # chat turns; book lookups (no tools) don't push them out
             self._kinds.pop(key, None)
             self._kinds[key] = (system, tools, opts)
             while len(self._kinds) > self.MAX_READY:
@@ -263,17 +264,26 @@ class ClaudeCodeProvider:
     async def _turn(client: ClaudeSDKClient, prompt: str, on_text=None) -> tuple[list[str], ResultMessage | None]:
         texts: list[str] = []
         result: ResultMessage | None = None
+        t0 = time.monotonic()
+        marks: dict[str, float] = {}  # when the first of each kind of message came, for the log
         await client.query(prompt)
         async for msg in client.receive_response():
+            kind = type(msg).__name__
+            marks.setdefault(kind, time.monotonic() - t0)
             if isinstance(msg, StreamEvent):
                 ev = msg.event or {}
                 delta = ev.get("delta") or {}
-                if on_text and ev.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
-                    await on_text(delta.get("text") or "")
+                if ev.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
+                    marks.setdefault("first text", time.monotonic() - t0)
+                    if on_text:
+                        await on_text(delta.get("text") or "")
             elif isinstance(msg, AssistantMessage):
                 turn_text = "".join(b.text for b in msg.content if isinstance(b, TextBlock))
                 if turn_text.strip():
                     texts.append(turn_text)
             elif isinstance(msg, ResultMessage):
                 result = msg
+        log.info("claude turn timeline: %s; api %.1fs of %.1fs",
+                 ", ".join(f"{k} {v:.1f}s" for k, v in marks.items()),
+                 (getattr(result, "duration_api_ms", 0) or 0) / 1000, (getattr(result, "duration_ms", 0) or 0) / 1000)
         return texts, result

@@ -56,6 +56,7 @@ class ClaudeOptions:
     effort: str | None = None  # "high", "medium", "low"; None = Claude's default (high)
     warm: bool = True  # keep the next Claude Code process started and waiting
     think: bool = True  # False: no extended thinking at all (fastest first words, for spoken replies)
+    warm_without_tools: bool = False  # keep a process ready even for turns with no tools (Charlotte)
 
 
 # Set by Models.for_user for the turn being run; the Claude provider reads it.

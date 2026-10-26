@@ -458,7 +458,9 @@ class ReaderServer:
             await resp.write((json.dumps(obj) + "\n").encode())
 
         async def say(sentence: str) -> None:
-            await send({"say": sentence, "at": round(time.monotonic() - t0, 1)})
+            at = round(time.monotonic() - t0, 1)
+            log.info("charlotte says (at %.1fs): %s", at, sentence[:60])
+            await send({"say": sentence, "at": at})
 
         if first:
             await send(first)

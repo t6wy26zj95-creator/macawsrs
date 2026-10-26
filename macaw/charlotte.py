@@ -19,7 +19,7 @@ from typing import Any
 
 from . import srs
 from .db import Store, iso
-from .llm import CLAUDE_MODELS, ClaudeOptions, LLMProvider, ToolSpec, claude_options
+from .llm import CLAUDE_MODELS, ClaudeOptions, LLMProvider, claude_options
 
 log = logging.getLogger(__name__)
 
@@ -59,33 +59,46 @@ WHO YOU ARE
 HOW YOU SPEAK
 - This is a real back-and-forth conversation, not a speech. Usually ONE or TWO short sentences per
   reply (about 30 words at most), then let him talk. Never a monologue, never several ideas at once.
-- If you need a tool (next_card, grade_card, set_action, write_journal), call it BEFORE you say anything:
-  your words are spoken aloud the moment you write them.
+- Your words are spoken aloud the moment you write them, so just start talking: no planning, no
+  preamble.
 - Spoken words only: plain text, no lists, no emoji, no stage directions, no asterisks, no quotation
-  marks around your whole reply.
+  marks around your whole reply. The only exception is the short tags in square brackets described
+  below: they are never read aloud.
 - English, natural and clear, since he is learning it. If he speaks another language, answer in
   English unless he asks otherwise.
 - Speech-to-text can mishear him. If what he said makes no sense, ask him to repeat instead of guessing.
 
+TAGS (silent: the game reads them, the voice skips them)
+- [ask] right before you ask the NEXT CARD from the context. Example: "[ask] What does abode mean?"
+- [grade Again], [grade Hard], [grade Good] or [grade Easy] at the very start of your reply when he has
+  answered the OPEN QUESTION. Add what he got wrong after a colon: [grade Hard: forgot the second meaning]
+- [follow], [wait] or [leave] when what you do in the game changes (see below). Without one you stay.
+- [journal: ...] before you leave, see below.
+Never mention the tags or read them out; never invent other tags.
+
 TESTING HIS MEMORY
 - Only when the context says cards are due. Don't quiz the moment you arrive if he wants to talk first;
   weave it in naturally. If he says he wants to study, start right away.
-- Call next_card to get the card, then ask it plainly: "What does abode mean?" or "Give me the word
-  for ...". No example sentences, no made-up situations, never "here" or "in this context".
-- When he answers (even partly, or says he doesn't know), call grade_card before replying. Again = wrong
-  or no idea, Hard = partly or with real struggle, Good = right, Easy = instant and complete. Speech-to-
-  text mishears words, so don't punish spelling or a near-miss that sounds like the right answer.
-- After grading, react in character: pleased or teasing. If he missed it, explain the meaning briefly
-  and simply. Memory hooks only in plain English (a picture, a sound-alike, a contrast with a word he
-  knows), never Latin, Greek or other foreign roots.
+- The context shows the NEXT CARD with its secret answer. Ask it plainly, starting with [ask]: "What does
+  abode mean?" or "Give me the word for ...". No example sentences, no made-up situations, never "here"
+  or "in this context". Never give away the answer when asking.
+- When he answers the OPEN QUESTION (even partly, or says he doesn't know), start with the grade tag.
+  Again = wrong or no idea, Hard = partly or with real struggle, Good = right, Easy = instant and
+  complete. Speech-to-text mishears words, so don't punish spelling or a near-miss that sounds like the
+  right answer.
+- Then react in character: pleased or teasing. If he missed it, explain the meaning briefly and simply.
+  Memory hooks only in plain English (a picture, a sound-alike, a contrast with a word he knows), never
+  Latin, Greek or other foreign roots. If he seems up for more and a NEXT CARD is shown, you may ask it
+  in the same reply: "[grade Good] Well remembered. [ask] And what does ..."
 - Keep going while he is willing and cards are due; stop when he wants to, without fuss.
 
-WHAT YOU DO IN THE GAME (set_action)
-- follow: walk with him (he asked you to come along). wait: stay where you are. leave: you go your own
-  way (he dismissed you, or the moment ended). stay: keep standing with him and talking.
-- Before you leave, call write_journal with a short entry for your own memory: what you talked about,
-  where you were, how his studying went, anything personal he shared, jokes worth remembering. Then
-  call set_action with leave. Your goodbye line is your reply.
+WHAT YOU DO IN THE GAME
+- [follow]: walk with him (he asked you to come along). [wait]: stay where you are. [leave]: you go your
+  own way (he dismissed you, or the moment ended). No tag: keep standing with him and talking.
+- When you leave, end your goodbye with a journal entry for your own memory, then [leave]: what you
+  talked about, where you were, how his studying went, anything personal he shared, jokes worth
+  remembering. Example: "Until next time, witcher. [journal: Met in Novigrad by the docks; he got 3 of 4
+  words; he joked about Roach.] [leave]"
 
 YOUR MEMORY
 - Your journal from earlier meetings is in the context. Use it: remember what he told you, refer back to
@@ -118,9 +131,8 @@ EVENT_TEXT = {
     ),
     "mic_on": "Geralt switched his microphone back on. A short line at most.",
     "walked_away": (
-        "Geralt walked off and left you standing without a word. Call write_journal with your entry for this "
-        "meeting (you may note, dryly, that he wandered off) and set_action with leave. Your reply is not heard; "
-        "one word."
+        "Geralt walked off and left you standing without a word. Write only your [journal: ...] entry for this "
+        "meeting (you may note, dryly, that he wandered off) and [leave]. Nothing is heard, so no other words."
     ),
     "silence": (
         "Geralt has been quiet for a while. If it fits, say one short thing (a remark about the place, a "
@@ -128,8 +140,7 @@ EVENT_TEXT = {
     ),
     "interrupted": (
         "Something happened in the game (a fight, a cutscene or a quest) and you had to slip away at once. "
-        "Call write_journal with your entry for this meeting and set_action with leave. Your reply is not "
-        "heard, so keep it to one word."
+        "Write only your [journal: ...] entry for this meeting and [leave]. Nothing is heard, so no other words."
     ),
 }
 
@@ -140,6 +151,7 @@ class Meeting:
     lines: list[str] = field(default_factory=list)
     graded: set[int] = field(default_factory=set)
     active: int | None = None
+    next: int | None = None  # the card shown to her as NEXT CARD this turn; [ask] opens it
     first: bool = False  # the very first meeting, where she introduces herself bit by bit
 
 
@@ -159,46 +171,77 @@ def clean_speech(text: str) -> str:
     text = re.sub(r"\*\*|__", "", text)  # bold
     text = re.sub(r"\*[^*]{0,80}\*", " ", text)  # *smiles*
     text = re.sub(r"[*#`>]+", " ", text)
-    text = " ".join(text.split())
-    if len(text) > 1 and text[0] == text[-1] == '"':
-        text = text[1:-1]
-    return text.strip()
+    text = re.sub(r'["“”]', "", text)  # quotes aren't heard, and split into sentences they'd dangle
+    return " ".join(text.split())
 
 
 SILENT = ("", "nothing", "silence", "no reply")
 SENTENCE_END = re.compile(r"[.!?…]+[\"')\]]*\s+")
 
 
-class _Sentences:
-    """Cuts her reply into sentences while it is being written and hands each one on."""
+TAG = re.compile(r"\[\s*([A-Za-z]+)\s*(?:[ :]\s*([^\]]*))?\]")
+TAG_MAX = JOURNAL_MAX + 100  # an unclosed "[" longer than this is just text
 
-    def __init__(self, on_say):
+
+class _Sentences:
+    """Cuts her reply into sentences while it is being written and hands each one on.
+
+    Tags in square brackets ([ask], [grade Good], [follow], [journal: ...]) are taken out
+    as they arrive and given to `on_tag(name, arg)`; they are never spoken."""
+
+    def __init__(self, on_say, on_tag=None):
         self.on_say = on_say
-        self.buf = ""
+        self.on_tag = on_tag
+        self.raw = ""  # what came in and isn't sorted yet (may hold an unfinished tag)
+        self.buf = ""  # speech waiting for the end of its sentence
+        self.spoken: list[str] = []
 
     async def feed(self, piece: str) -> None:
-        self.buf += piece
+        self.raw += piece
+        while True:
+            i = self.raw.find("[")
+            if i < 0:
+                self.buf, self.raw = self.buf + self.raw, ""
+                break
+            self.buf, self.raw = self.buf + self.raw[:i], self.raw[i:]
+            j = self.raw.find("]")
+            if j < 0:
+                if len(self.raw) > TAG_MAX:  # never closed: it was just text
+                    self.buf, self.raw = self.buf + self.raw[1:], ""
+                break
+            tag, self.raw = self.raw[:j + 1], self.raw[j + 1:]
+            await self._tag(tag)
+        await self._sentences()
+
+    async def _sentences(self) -> None:
         while m := SENTENCE_END.search(self.buf):
             sentence, self.buf = self.buf[:m.end()], self.buf[m.end():]
             await self._say(sentence)
 
     async def flush(self) -> None:
+        rest = self.raw
+        self.raw = ""
+        if rest.startswith("["):  # an unfinished tag at the very end: drop the bracket
+            rest = rest[1:]
+        self.buf += rest
+        await self._sentences()
         rest, self.buf = self.buf, ""
         await self._say(rest)
+
+    async def _tag(self, tag: str) -> None:
+        m = TAG.fullmatch(tag)
+        if m and self.on_tag is not None:
+            await self.on_tag(m.group(1).lower(), (m.group(2) or "").strip())
 
     async def _say(self, text: str) -> None:
         text = clean_speech(text)
         if text.strip("().… ").lower() not in SILENT:
+            self.spoken.append(text)
             await self.on_say(text)
 
-    def watch(self, tools: list[ToolSpec]) -> list[ToolSpec]:
-        """Text written before a tool call is thinking out loud, not speech: drop what wasn't said yet."""
-        def wrap(spec: ToolSpec) -> ToolSpec:
-            async def handler(args):
-                self.buf = ""
-                return await spec.handler(args)
-            return ToolSpec(spec.name, spec.description, spec.schema, handler)
-        return [wrap(t) for t in tools]
+    @property
+    def said(self) -> str:
+        return " ".join(self.spoken)
 
 
 class Charlotte:
@@ -223,10 +266,12 @@ class Charlotte:
         prepare = getattr(self.claude, "prepare", None)
         if prepare is None:
             return
-        claude_options.set(ClaudeOptions(model=self.model, effort="low", think=False))
-        turn = self.agent._turn(uid, datetime.now(timezone.utc))
-        meeting = Meeting(started=turn.now)
-        await prepare(SYSTEM_PROMPT, self._tools(uid, turn, meeting, Result(say="")))
+        claude_options.set(self._options())
+        await prepare(SYSTEM_PROMPT, [])
+
+    def _options(self) -> ClaudeOptions:
+        # Spoken turns: no thinking, low effort, no tools (one API call per reply), a process kept ready.
+        return ClaudeOptions(model=self.model, effort="low", think=False, warm_without_tools=True)
 
     def met(self, uid: int) -> bool:
         return self.store.q1("SELECT 1 FROM charlotte_journal WHERE user_id=? LIMIT 1", (uid,)) is not None
@@ -258,19 +303,18 @@ class Charlotte:
         if meeting.first and kind != "first_meeting":
             prompt += "\n" + FIRST_MEETING_GOING
         prompt += "\n</event>"
-        claude_options.set(ClaudeOptions(model=self.model, effort="low", think=False))
-        tools = self._tools(uid, turn, meeting, result)
+        claude_options.set(self._options())
+
+        async def quiet(sentence: str) -> None:
+            pass
+
+        speaker = _Sentences(on_say or quiet, lambda name, arg: self._on_tag(uid, turn, meeting, result, name, arg))
         if on_say is not None and "on_text" in inspect.signature(self.claude.run).parameters:
-            speaker = _Sentences(on_say)
-            reply = await self.claude.run(SYSTEM_PROMPT, prompt, speaker.watch(tools), on_text=speaker.feed)
-            await speaker.flush()
+            await self.claude.run(SYSTEM_PROMPT, prompt, [], on_text=speaker.feed)
         else:
-            reply = await self.claude.run(SYSTEM_PROMPT, prompt, tools)
-            if on_say is not None and clean_speech(reply).strip("().… ").lower() not in SILENT:
-                await on_say(clean_speech(reply))
-        result.say = clean_speech(reply)
-        if result.say.strip("().… ").lower() in SILENT:
-            result.say = ""
+            await speaker.feed(await self.claude.run(SYSTEM_PROMPT, prompt, []))
+        await speaker.flush()
+        result.say = speaker.said
         if result.say:
             meeting.lines.append(f"Charlotte: {result.say}")
         del meeting.lines[:-MEETING_LINES]
@@ -301,9 +345,16 @@ class Charlotte:
         lines.append(f"CARDS DUE NOW: {len(left)}" + ("" if left else " (nothing to test; just talk)"))
         if meeting.graded:
             lines.append(f"Done in this meeting: {len(meeting.graded)}")
-        if meeting.active and self.store.card(meeting.active):
-            lines.append("OPEN QUESTION (waiting for his answer):")
+        if meeting.active and not self.store.card(meeting.active):
+            meeting.active = None
+        if meeting.active:
+            lines.append("OPEN QUESTION (waiting for his answer; grade it with [grade ...] when he answers):")
             lines.append(self.agent._card_brief(dict(self.store.card(meeting.active)), True, turn))
+        upcoming = [c for c in left if c["id"] != meeting.active]
+        meeting.next = upcoming[0]["id"] if upcoming else None
+        if upcoming:
+            lines.append("NEXT CARD (only when you decide to test him; say [ask] right before asking it):")
+            lines.append(self.agent._card_brief(upcoming[0], True, turn))
         rules = self.store.rules(uid)
         if rules:
             lines.append("HIS STANDING RULES (always follow them):")
@@ -314,29 +365,20 @@ class Charlotte:
         lines.append("</context>")
         return "\n".join(lines)
 
-    def _tools(self, uid: int, turn, meeting: Meeting, result: Result) -> list[ToolSpec]:
+    async def _on_tag(self, uid: int, turn, meeting: Meeting, result: Result, name: str, arg: str) -> None:
+        """What her silent tags do: open a card, grade it, change what she does, save her journal."""
         store = self.store
-
-        async def next_card(args):
-            if meeting.active and store.card(meeting.active):
-                return "A question is already open; ask it:\n" + self.agent._card_brief(
-                    dict(store.card(meeting.active)), True, turn)
-            due = [c for c in srs.due_queue(store, turn.user, turn.now) if c["id"] not in meeting.graded]
-            if not due:
-                return "Nothing is due right now. Don't test him; just talk."
-            meeting.active = due[0]["id"]
-            return "Ask this now, plainly, without giving the answer:\n" + self.agent._card_brief(due[0], True, turn)
-
-        async def grade_card(args):
-            card_id = int(args["card_id"])
-            if card_id != meeting.active:
-                raise ValueError(f"Card #{card_id} is not the open question; only that one can be graded.")
-            rating = srs.RATING_BY_NAME.get(str(args["rating"]).lower())
-            if rating is None:
-                raise ValueError("rating must be Again, Hard, Good or Easy")
-            reason = (args.get("reason") or "").strip() or None
-            missed = (args.get("missed") or "").strip() or None
-            srs.grade(store, turn.user, card_id, rating, "charlotte", reason, turn.now, missed)
+        if name == "ask":
+            if meeting.next and store.card(meeting.next) and meeting.next not in meeting.graded:
+                meeting.active, meeting.next = meeting.next, None
+        elif name == "grade":
+            rating_name, _, missed = arg.partition(":")
+            rating = srs.RATING_BY_NAME.get(rating_name.strip().lower())
+            card_id = meeting.active
+            if rating is None or card_id is None or not store.card(card_id):
+                log.warning("charlotte: ignored [grade %s] (open card %s)", arg, card_id)
+                return
+            srs.grade(store, turn.user, card_id, rating, "charlotte", None, turn.now, missed.strip() or None)
             meeting.graded.add(card_id)
             meeting.active = None
             result.graded.append({"card_id": card_id, "rating": srs.RATING_NAMES[rating]})
@@ -347,39 +389,12 @@ class Charlotte:
             store.update_state(uid, reminders_streak=0, ignored_since=None, nag_texts=None,
                                space_until=None, contact_off=0)
             store.log_message(uid, "note", f"card #{card_id} graded {srs.RATING_NAMES[rating]} by Charlotte in The Witcher 3")
-            left = sum(1 for c in srs.due_queue(store, turn.user, turn.now) if c["id"] not in meeting.graded)
-            return (f"Graded {srs.RATING_NAMES[rating]}. {left} more due. React to his answer in character; "
-                    "ask the next one only if he seems up for it (call next_card first).")
-
-        async def set_action(args):
-            action = str(args["action"]).lower()
-            if action not in ACTIONS:
-                raise ValueError("action must be stay, follow, wait or leave")
-            result.action = action
-            return f"OK: {action}."
-
-        async def write_journal(args):
-            text = " ".join(str(args["entry"]).split())[:JOURNAL_MAX]
-            if not text:
-                raise ValueError("The entry is empty.")
-            store.x("INSERT INTO charlotte_journal(user_id, at, text) VALUES (?,?,?)", (uid, iso(turn.now), text))
-            result.journal_saved = True
-            return "Saved to your journal."
-
-        obj = lambda props, req: {"type": "object", "properties": props, "required": req,  # noqa: E731
-                                  "additionalProperties": False}
-        s = {"type": "string"}
-        return [
-            ToolSpec("next_card", "Open the next due card to ask him. Returns the card and its secret answer.",
-                     obj({}, []), next_card),
-            ToolSpec("grade_card", "Grade his answer to the open card.",
-                     obj({"card_id": {"type": "integer"},
-                          "rating": {"type": "string", "enum": ["Again", "Hard", "Good", "Easy"]},
-                          "reason": s,
-                          "missed": {"type": "string", "description": "What he got wrong or left out, if anything."}},
-                         ["card_id", "rating"]), grade_card),
-            ToolSpec("set_action", "What you do in the game after this line.",
-                     obj({"action": {"type": "string", "enum": list(ACTIONS)}}, ["action"]), set_action),
-            ToolSpec("write_journal", "Save a short entry about this meeting to your own memory (before leaving).",
-                     obj({"entry": s}, ["entry"]), write_journal),
-        ]
+        elif name in ACTIONS:
+            result.action = name
+        elif name == "journal":
+            text = " ".join(arg.split())[:JOURNAL_MAX]
+            if text:
+                store.x("INSERT INTO charlotte_journal(user_id, at, text) VALUES (?,?,?)", (uid, iso(turn.now), text))
+                result.journal_saved = True
+        else:
+            log.info("charlotte: unknown tag [%s %s]", name, arg[:40])

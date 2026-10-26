@@ -37,12 +37,12 @@ async def test_first_meeting_then_journal(setup, store):
     async def bye(prompt, t):
         assert "Geralt: I have to go" in prompt
         assert "Charlotte: Geralt of Rivia? Forgive me." in prompt
-        await t["write_journal"]({"entry": "Met Geralt in Velen. He agreed to the contract."})
-        await t["set_action"]({"action": "leave"})
-        return "Until next time."
+        assert t == {}  # no tools: every reply is a single call
+        return "Until next time. [journal: Met Geralt in Velen. He agreed to the contract.] [leave]"
 
     her.script.append(bye)
     r = await charlotte.event(UID, "speech", said="I have to go", now=NOW)
+    assert r.say == "Until next time."
     assert r.action == "leave" and r.journal_saved
     assert charlotte.status(UID, NOW)["met"] is True
 
@@ -61,26 +61,31 @@ async def test_quiz_grades_with_the_bot_scheduler(setup, store):
     await _make_deck_with_card(agent, llm)
     assert charlotte.status(UID, NOW)["due"] == 1
 
+    async def chat(prompt, t):
+        assert "CARDS DUE NOW: 1" in prompt and "NEXT CARD" in prompt and "Ask about: ubiquitous" in prompt
+        return "[grade Good] Lovely weather."  # nothing is open yet: a stray grade does nothing
+
+    her.script.append(chat)
+    r = await charlotte.event(UID, "arrive", now=NOW)
+    assert r.say == "Lovely weather." and r.graded == [] and charlotte.meetings[UID].active is None
+
     async def ask(prompt, t):
-        assert "CARDS DUE NOW: 1" in prompt
-        out = await t["next_card"]({})
-        assert "Ask about: ubiquitous" in out
-        return "What does ubiquitous mean?"
+        return "Shall we? [ask] What does ubiquitous mean?"
 
     her.script.append(ask)
-    await charlotte.event(UID, "arrive", now=NOW)
+    r = await charlotte.event(UID, "speech", said="sure", now=NOW)
+    assert r.say == "Shall we? What does ubiquitous mean?"
     card_id = charlotte.meetings[UID].active
+    assert card_id is not None
 
     async def grade(prompt, t):
         assert "OPEN QUESTION" in prompt and "present everywhere" in prompt
-        with pytest.raises(ValueError):
-            await t["grade_card"]({"card_id": card_id + 99, "rating": "Good"})
-        out = await t["grade_card"]({"card_id": card_id, "rating": "Good"})
-        assert out.startswith("Graded Good. 0 more due")
-        return "Well remembered."
+        assert "NEXT CARD" not in prompt  # the only card is the open one
+        return "[grade Good] Well remembered. [follow]"
 
     her.script.append(grade)
     r = await charlotte.event(UID, "speech", said="it means everywhere", now=NOW)
+    assert r.say == "Well remembered." and r.action == "follow"
     assert r.graded == [{"card_id": card_id, "rating": "Good"}]
     log = store.q("SELECT source FROM review_log WHERE card_id=?", (card_id,))
     assert [row["source"] for row in log] == ["charlotte"]
@@ -160,16 +165,12 @@ async def test_server_owner_only(store, tmp_path):
 class StreamingLLM(FakeLLM):
     """Like FakeLLM, but writes its reply in pieces through on_text, the way Claude streams."""
 
-    def __init__(self, pieces, tool_first=None):
+    def __init__(self, pieces):
         super().__init__()
         self.pieces = pieces
-        self.tool_first = tool_first
 
     async def run(self, system, prompt, tools, must_use_tool=False, on_text=None):
-        handlers = {t.name: t.handler for t in tools}
-        if self.tool_first:
-            await on_text("Let me look")  # an unfinished thought before a tool call: dropped, never spoken
-            await handlers[self.tool_first[0]](self.tool_first[1])
+        assert tools == []
         for p in self.pieces:
             await on_text(p)
         return "".join(self.pieces)
@@ -177,8 +178,8 @@ class StreamingLLM(FakeLLM):
 
 async def test_sentences_are_spoken_as_they_are_written(store):
     agent = Agent(store, FakeLLM())
-    her = StreamingLLM(["Hello there, Geralt. How", " are you? *smiles* I'm well", "."],
-                       tool_first=("set_action", {"action": "follow"}))
+    her = StreamingLLM(["[fol", "low] Hello there, Geralt. How", " are you? *smiles* I'm well", ". [journal: met",
+                        " him. Fine day.] [", "wait]"])
     charlotte = Charlotte(store, agent, her)
     said = []
 
@@ -187,7 +188,8 @@ async def test_sentences_are_spoken_as_they_are_written(store):
 
     r = await charlotte.event(UID, "arrive", game={}, now=NOW, on_say=on_say)
     assert said == ["Hello there, Geralt.", "How are you?", "I'm well."]
-    assert r.say == "Hello there, Geralt. How are you? I'm well." and r.action == "follow"
+    assert r.say == "Hello there, Geralt. How are you? I'm well." and r.action == "wait" and r.journal_saved
+    assert store.q1("SELECT text FROM charlotte_journal")["text"] == "met him. Fine day."
 
 
 async def test_streamed_turn_over_http(store, tmp_path):
