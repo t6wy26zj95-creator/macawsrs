@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 
 from aiogram import Bot
 from aiogram.types import BotCommand, BotCommandScopeChat
 
 from .agent import Agent
 from .bot.app import App, build_dispatcher
+from .charlotte import Charlotte
 from .config import load_config
 from .db import Store
 from .llm import Models, make_free_provider, make_provider
@@ -67,7 +69,9 @@ async def main() -> None:
     web = await reader.start(
         reader.ReaderServer(config.bot_token, app._allowed, app.library, store,
                             explain=app.explain_word, add_word=app.add_book_word,
-                            ask=app.ask_about_word),
+                            ask=app.ask_about_word,
+                            charlotte=Charlotte(store, agent, claude, os.environ.get("CHARLOTTE_MODEL") or "sonnet"),
+                            owners=config.owner_ids),
         "127.0.0.1",
         config.reader_port,
     )

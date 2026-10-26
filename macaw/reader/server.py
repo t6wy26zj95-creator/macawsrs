@@ -97,8 +97,8 @@ def _key(bot_token: str) -> bytes:
     return hashlib.sha256(b"macaw-reader:" + bot_token.encode()).digest()
 
 
-def make_token(bot_token: str, user_id: int, now: float | None = None) -> str:
-    exp = int((now or time.time()) + TOKEN_DAYS * 86400)
+def make_token(bot_token: str, user_id: int, now: float | None = None, days: int = TOKEN_DAYS) -> str:
+    exp = int((now or time.time()) + days * 86400)
     body = f"{user_id}.{exp}"
     sig = hmac.new(_key(bot_token), body.encode(), hashlib.sha256).hexdigest()[:32]
     return f"{body}.{sig}"
@@ -120,7 +120,7 @@ def read_token(bot_token: str, token: str, now: float | None = None) -> int | No
 
 class ReaderServer:
     def __init__(self, bot_token: str, allowed, library: Library, store: Store, explain=None, add_word=None, ask=None,
-                 find_pictures=pictures.find):
+                 find_pictures=pictures.find, charlotte=None, owners: frozenset[int] = frozenset()):
         self.bot_token = bot_token
         self.allowed = allowed  # callable: user id -> bool
         self.library = library
@@ -131,6 +131,8 @@ class ReaderServer:
         self.add_word = add_word
         self.ask = ask  # ask(uid, word, sentence, context, book, explanation, history, question) -> text
         self.find_pictures = find_pictures
+        self.charlotte = charlotte  # the Witcher 3 companion (macaw.charlotte.Charlotte); owners only
+        self.owners = owners
         self._explained: dict[tuple, dict] = {}
         self._pictures: dict[str, list] = {}
 
@@ -154,6 +156,8 @@ class ReaderServer:
         r.add_post("/api/books/{id:\\d+}/add-word", self.add_to_deck)
         r.add_post("/api/books/{id:\\d+}/ask", self.ask_about)
         r.add_get("/api/pictures", self.pictures)
+        r.add_get("/api/charlotte/status", self.charlotte_status)
+        r.add_post("/api/charlotte/event", self.charlotte_event)
         return app
 
     @web.middleware
@@ -380,12 +384,45 @@ class ReaderServer:
         resp.headers["Cache-Control"] = "private, max-age=86400"
         return resp
 
+    async def charlotte_status(self, request: web.Request) -> web.Response:
+        uid = _charlotte_user(self, request)
+        return web.json_response(self.charlotte.status(uid))
+
+    async def charlotte_event(self, request: web.Request) -> web.Response:
+        uid = _charlotte_user(self, request)
+        body = await request.json()
+        kind = str(body.get("event") or "")
+        said = str(body.get("said") or "")
+        game = body.get("game") if isinstance(body.get("game"), dict) else {}
+        if len(json.dumps(game)) > CHARLOTTE_GAME_MAX:
+            raise web.HTTPBadRequest(text="Game info too long.")
+        try:
+            result = await self.charlotte.event(uid, kind, said, game)
+        except ValueError as e:
+            raise web.HTTPBadRequest(text=str(e))
+        except LLMError as e:
+            log.warning("charlotte turn failed: %s", e)
+            # Out of Claude for now: she excuses herself instead of a weaker model taking over.
+            return web.json_response({"say": "Forgive me, Geralt, my head is spinning. Another time.",
+                                      "action": "leave", "error": "unavailable"})
+        return web.json_response(result.as_dict())
+
     async def add_to_deck(self, request: web.Request) -> web.Response:
         uid, row, w = await self._word(request)
         if not self.add_word:
             return web.json_response({"error": "Adding words isn't switched on."}, status=503)
         self.add_word(uid, w["word"], w["sentence"], w["meaning"], row["title"])
         return web.json_response({"ok": True})
+
+
+CHARLOTTE_GAME_MAX = 2000
+
+
+def _charlotte_user(server: "ReaderServer", request: web.Request) -> int:
+    uid = server._user(request)
+    if server.charlotte is None or uid not in server.owners:
+        raise web.HTTPForbidden(text="Charlotte is only for the bot's owner.")
+    return uid
 
 
 async def start(server: ReaderServer, host: str, port: int) -> web.AppRunner | None:
