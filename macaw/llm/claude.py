@@ -263,17 +263,26 @@ class ClaudeCodeProvider:
     async def _turn(client: ClaudeSDKClient, prompt: str, on_text=None) -> tuple[list[str], ResultMessage | None]:
         texts: list[str] = []
         result: ResultMessage | None = None
+        t0 = time.monotonic()
+        marks: dict[str, float] = {}  # when the first of each kind of message came, for the log
         await client.query(prompt)
         async for msg in client.receive_response():
+            kind = type(msg).__name__
+            marks.setdefault(kind, time.monotonic() - t0)
             if isinstance(msg, StreamEvent):
                 ev = msg.event or {}
                 delta = ev.get("delta") or {}
-                if on_text and ev.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
-                    await on_text(delta.get("text") or "")
+                if ev.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
+                    marks.setdefault("first text", time.monotonic() - t0)
+                    if on_text:
+                        await on_text(delta.get("text") or "")
             elif isinstance(msg, AssistantMessage):
                 turn_text = "".join(b.text for b in msg.content if isinstance(b, TextBlock))
                 if turn_text.strip():
                     texts.append(turn_text)
             elif isinstance(msg, ResultMessage):
                 result = msg
+        log.info("claude turn timeline: %s; api %.1fs of %.1fs",
+                 ", ".join(f"{k} {v:.1f}s" for k, v in marks.items()),
+                 (getattr(result, "duration_api_ms", 0) or 0) / 1000, (getattr(result, "duration_ms", 0) or 0) / 1000)
         return texts, result

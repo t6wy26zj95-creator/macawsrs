@@ -281,7 +281,8 @@ class Helper:
                         log.info("Charlotte: %s", obj["say"])
                 elif "say" in obj and self.state != IDLE:
                     if first:
-                        log.info("(first words after %.1fs)", time.monotonic() - since)
+                        log.info("(first words after %.1fs; the bot had it %ss into its turn)",
+                                 time.monotonic() - since, obj.get("at", "?"))
                         first = False
                     self.wait_for_menu()
                     log.info("Charlotte: %s", obj["say"])
