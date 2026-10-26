@@ -104,7 +104,6 @@ function CHL_Behind( dist : float ) : Vector
 	dir.Z = 0;
 	dir = VecNormalize( dir );
 	pos = thePlayer.GetWorldPosition() - dir * dist;
-	pos.Z = thePlayer.GetWorldPosition().Z;
 	return CHL_Ground( pos );
 }
 
