@@ -280,7 +280,7 @@ class Helper:
                     log.warning("Charlotte couldn't appear: %s", lines)
                     self.next_visit = now + 300
                     return
-                log.info("Charlotte is on her way")
+                log.info("Charlotte is on her way: %s", " ".join(self.call("chl_where")))
                 self.state, self.spawned_at = APPROACH, now
             return
 
@@ -296,6 +296,7 @@ class Helper:
         near = int(f.get("near10", "-1"))
         if self.state == APPROACH:
             if 0 <= near <= 35:
+                log.info("Charlotte arrived: %s", " ".join(self.call("chl_where")))
                 self.call("chl_face")
                 self.poll(full=True)
                 self.read_story()

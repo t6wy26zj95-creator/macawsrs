@@ -95,6 +95,19 @@ function CHL_Weather() : string
 	return "cloudy";
 }
 
+// A spot `dist` metres behind the camera on the ground, at about Geralt's height.
+function CHL_Behind( dist : float ) : Vector
+{
+	var dir, pos : Vector;
+
+	dir = theCamera.GetCameraDirection();
+	dir.Z = 0;
+	dir = VecNormalize( dir );
+	pos = thePlayer.GetWorldPosition() - dir * dist;
+	pos.Z = thePlayer.GetWorldPosition().Z;
+	return CHL_Ground( pos );
+}
+
 function CHL_Ground( pos : Vector ) : Vector
 {
 	var hit, normal : Vector;
@@ -148,7 +161,7 @@ function CHL_Remove()
 	if ( dist > 60 && chlFollowId != 0 )
 	{
 		// Left far behind (fast travel, a gallop): she catches up out of view.
-		chlNpc.Teleport( CHL_Ground( GetWorldPosition() - theCamera.GetCameraDirection() * 8.0 ) );
+		chlNpc.Teleport( CHL_Behind( 8.0 ) );
 	}
 }
 
@@ -242,14 +255,17 @@ exec function chl_spawn( seq : int, template : string )
 
 	if ( thePlayer.chlNpc )
 		CHL_Remove();
-	res = (CEntityTemplate)LoadResource( template );
+	if ( StrFindFirst( template, ".w2ent" ) >= 0 )
+		res = (CEntityTemplate)LoadResource( template, true );  // a full path to a .w2ent
+	else
+		res = (CEntityTemplate)LoadResource( template );  // a short name from the game's list
 	if ( !res )
 	{
 		CHL_Line( seq, "error no-template" );
 		CHL_End( seq );
 		return;
 	}
-	pos = CHL_Ground( thePlayer.GetWorldPosition() - theCamera.GetCameraDirection() * 18.0 );
+	pos = CHL_Behind( 18.0 );
 	rot = thePlayer.GetWorldRotation();
 	ent = theGame.CreateEntity( res, pos, rot );
 	thePlayer.CHL_SetNpc( (CNewNPC)ent );
@@ -288,7 +304,7 @@ exec function chl_closer( seq : int )
 {
 	if ( thePlayer.chlNpc )
 	{
-		thePlayer.chlNpc.Teleport( CHL_Ground( thePlayer.GetWorldPosition() - theCamera.GetCameraDirection() * 5.0 ) );
+		thePlayer.chlNpc.Teleport( CHL_Behind( 5.0 ) );
 		thePlayer.chlNpc.ActionMoveToDynamicNodeAsync( thePlayer, MT_Walk, 1.0, 2.2 );
 	}
 	CHL_End( seq );
@@ -338,6 +354,29 @@ exec function chl_action( seq : int, action : string )
 exec function chl_note( seq : int, text : string )
 {
 	theGame.GetGuiManager().ShowNotification( text );
+	CHL_End( seq );
+}
+
+function CHL_Pos( v : Vector ) : string
+{
+	return IntToString( FloorF( v.X ) ) + "," + IntToString( FloorF( v.Y ) ) + "," + IntToString( FloorF( v.Z ) );
+}
+
+// Where she is and whether she can be seen, for the log.
+exec function chl_where( seq : int )
+{
+	var her, me : Vector;
+
+	if ( thePlayer.chlNpc )
+	{
+		her = thePlayer.chlNpc.GetWorldPosition();
+		me = thePlayer.GetWorldPosition();
+		CHL_Line( seq, "where her " + CHL_Pos( her ) + " me " + CHL_Pos( me )
+			+ " look " + NameToString( thePlayer.chlNpc.GetAppearance() )
+			+ " visible " + CHL_B( thePlayer.chlNpc.GetVisibility() ) );
+	}
+	else
+		CHL_Line( seq, "where none" );
 	CHL_End( seq );
 }
 
