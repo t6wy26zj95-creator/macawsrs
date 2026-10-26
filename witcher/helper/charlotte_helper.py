@@ -94,6 +94,11 @@ class Bot:
 
 # ---------------- the helper ----------------
 
+MIC_HELP = ("Couldn't open your microphone, so Charlotte won't hear you yet. The helper keeps running and tries "
+            "again every 30 seconds.\nThe usual cause: Windows blocks the mic for desktop apps. Open Settings > "
+            "Privacy & security > Microphone and turn on 'Microphone access' and 'Let desktop apps access your "
+            "microphone'. Also check your headset is plugged in and set as the input in Settings > System > Sound.")
+
 IDLE, APPROACH, TALK = "idle", "approach", "talk"
 
 
@@ -304,12 +309,20 @@ class Helper:
 
     def run(self) -> None:
         threading.Thread(target=self.worker, daemon=True).start()
-        self.ears.start()
+        mic_tried = time.time()
+        if self.ears.start():
+            log.info("mic ready")
+        else:
+            print(MIC_HELP + "\n(" + self.ears.error + ")")
         last_tick = 0.0
         waiting_said = False
         while True:
             if self.mute.pressed():
                 self.toggle_mute()
+            if self.ears.stream is None and time.time() - mic_tried > 30:
+                mic_tried = time.time()
+                if self.ears.start():
+                    print("The mic works now.")
             if time.time() - last_tick >= 1.0:
                 last_tick = time.time()
                 try:

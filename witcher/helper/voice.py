@@ -40,27 +40,85 @@ class Ears:
         self.device = device
         self.enabled = False  # listening only while Charlotte is around and the mic isn't muted
         self.paused = False  # while she speaks
-        self.frames: queue.Queue = queue.Queue()
+        self.chunks: queue.Queue = queue.Queue()
+        self.in_rate = RATE
+        self.error = ""
         self.floor = 300.0  # background loudness, learned as it goes
         self.stream = None
         self.thread = threading.Thread(target=self._run, daemon=True)
 
-    def start(self) -> None:
-        self.stream = sd.InputStream(samplerate=RATE, channels=1, dtype="int16", blocksize=FRAME,
-                                     device=self.device, callback=self._on_audio)
-        self.stream.start()
-        self.thread.start()
+    def start(self) -> bool:
+        """Opens the mic. Returns False (and keeps the helper running) if no way of opening it worked."""
+        for device, rate in self._options():
+            try:
+                stream = sd.InputStream(samplerate=rate, channels=1, dtype="float32", device=device,
+                                        callback=self._on_audio)
+                stream.start()
+            except Exception as e:  # PortAudio errors differ by driver
+                self.error = str(e)
+                continue
+            self.stream, self.in_rate, self.device = stream, rate, device
+            if not self.thread.is_alive():
+                self.thread.start()
+            return True
+        return False
+
+    def _options(self):
+        """Ways to open the mic, most likely to work first: the chosen or default mic at its own rate,
+        then the same mic through other Windows audio systems, then any other mic."""
+        tried, out = set(), []
+
+        def add(index):
+            if index is None or index < 0 or index in tried:
+                return
+            try:
+                info = sd.query_devices(index)
+            except Exception:
+                return
+            if info.get("max_input_channels", 0) < 1:
+                return
+            tried.add(index)
+            out.append((index, int(info.get("default_samplerate") or 48000)))
+
+        if self.device is not None:
+            add(self.device)
+        try:
+            add(sd.default.device[0])
+        except Exception:
+            pass
+        try:
+            for api in sd.query_hostapis():
+                add(api.get("default_input_device"))
+            for i, _ in enumerate(sd.query_devices()):
+                add(i)
+        except Exception:
+            pass
+        if not out:
+            out.append((None, RATE))
+        return out
 
     def _on_audio(self, data, frames, time_info, status) -> None:
-        self.frames.put(data[:, 0].copy())
+        mono = data[:, 0]
+        if self.in_rate != RATE and len(mono) > 1:
+            n = max(1, int(round(len(mono) * RATE / self.in_rate)))
+            mono = np.interp(np.linspace(0, len(mono) - 1, n), np.arange(len(mono)), mono)
+        self.chunks.put((np.clip(mono, -1, 1) * 32767).astype(np.int16))
+
+    def _frames(self):
+        """The mic sound cut into 30 ms frames at 16 kHz."""
+        buf = np.zeros(0, dtype=np.int16)
+        while True:
+            buf = np.concatenate([buf, self.chunks.get()])
+            while len(buf) >= FRAME:
+                yield buf[:FRAME]
+                buf = buf[FRAME:]
 
     def _run(self) -> None:
         before: list[np.ndarray] = []
         speech: list[np.ndarray] = []
         loud = 0
         quiet_since = None
-        while True:
-            frame = self.frames.get()
+        for frame in self._frames():
             if not self.enabled or self.paused:
                 before, speech, loud, quiet_since = [], [], 0, None
                 continue
@@ -75,12 +133,10 @@ class Ears:
                     speech, quiet_since = list(before), None
                 continue
             speech.append(frame)
-            if level > threshold * 0.6:
-                quiet_since = None
-            elif quiet_since is None:
-                quiet_since = time.monotonic()
+            # counted in sound frames, not clock time, so a slow moment can't cut you off
+            quiet_since = 0 if level > threshold * 0.6 else (quiet_since or 0) + 1
             seconds = len(speech) * FRAME / RATE
-            if (quiet_since and time.monotonic() - quiet_since > END_SILENCE) or seconds > MAX_SECONDS:
+            if quiet_since * FRAME / RATE > END_SILENCE or seconds > MAX_SECONDS:
                 audio = np.concatenate(speech)
                 before, speech, loud, quiet_since = [], [], 0, None
                 if seconds >= MIN_SECONDS:

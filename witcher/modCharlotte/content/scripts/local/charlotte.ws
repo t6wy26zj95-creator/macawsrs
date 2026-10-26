@@ -155,7 +155,7 @@ exec function chl_poll( seq : int, optional full : int )
 	var near : int;
 	var busy : string;
 	var journal : CWitcherJournalManager;
-	var quest : CJournalQuest;
+	var tracked : CJournalQuest;
 	var goal : CJournalQuestObjective;
 
 	busy = CHL_Busy();
@@ -178,9 +178,9 @@ exec function chl_poll( seq : int, optional full : int )
 	if ( full == 1 )
 	{
 		journal = theGame.GetJournalManager();
-		quest = journal.GetTrackedQuest();
-		if ( quest )
-			CHL_Line( seq, "quest " + GetLocStringById( quest.GetTitleStringId() ) );
+		tracked = journal.GetTrackedQuest();
+		if ( tracked )
+			CHL_Line( seq, "quest " + GetLocStringById( tracked.GetTitleStringId() ) );
 		goal = journal.GetHighlightedObjective();
 		if ( goal )
 			CHL_Line( seq, "goal " + GetLocStringById( goal.GetTitleStringId() ) );
@@ -193,9 +193,8 @@ exec function chl_story( seq : int, offset : int )
 {
 	var journal : CWitcherJournalManager;
 	var entries : array<CJournalBase>;
-	var quest : CJournalQuest;
+	var tracked : CJournalQuest;
 	var i, found, shown : int;
-	var kind : int;
 
 	journal = theGame.GetJournalManager();
 	journal.GetActivatedOfType( 'CJournalQuest', entries );
@@ -203,15 +202,15 @@ exec function chl_story( seq : int, offset : int )
 	shown = 0;
 	for ( i = 0; i < entries.Size(); i += 1 )
 	{
-		quest = (CJournalQuest)entries[i];
-		if ( !quest || journal.GetEntryStatus( quest ) != JS_Success )
+		tracked = (CJournalQuest)entries[i];
+		if ( !tracked || journal.GetEntryStatus( tracked ) != JS_Success )
 			continue;
-		kind = quest.GetType();
-		if ( kind != 0 && kind != 1 && kind != 6 && kind != 7 )
+		// story quests only (the journal's main and chapter types), like the game's own quest list does
+		if ( tracked.GetType() != 0 && tracked.GetType() != 1 && tracked.GetType() != 6 && tracked.GetType() != 7 )
 			continue;
 		if ( found >= offset && shown < 12 )
 		{
-			CHL_Line( seq, "done " + GetLocStringById( quest.GetTitleStringId() ) );
+			CHL_Line( seq, "done " + GetLocStringById( tracked.GetTitleStringId() ) );
 			shown += 1;
 		}
 		found += 1;
