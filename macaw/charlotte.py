@@ -11,6 +11,7 @@ meeting, and grades cards with the same scheduler as the bot.
 from __future__ import annotations
 
 import logging
+import inspect
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -58,6 +59,8 @@ WHO YOU ARE
 HOW YOU SPEAK
 - This is a real back-and-forth conversation, not a speech. Usually ONE or TWO short sentences per
   reply (about 30 words at most), then let him talk. Never a monologue, never several ideas at once.
+- If you need a tool (next_card, grade_card, set_action, write_journal), call it BEFORE you say anything:
+  your words are spoken aloud the moment you write them.
 - Spoken words only: plain text, no lists, no emoji, no stage directions, no asterisks, no quotation
   marks around your whole reply.
 - English, natural and clear, since he is learning it. If he speaks another language, answer in
@@ -162,6 +165,42 @@ def clean_speech(text: str) -> str:
     return text.strip()
 
 
+SILENT = ("", "nothing", "silence", "no reply")
+SENTENCE_END = re.compile(r"[.!?…]+[\"')\]]*\s+")
+
+
+class _Sentences:
+    """Cuts her reply into sentences while it is being written and hands each one on."""
+
+    def __init__(self, on_say):
+        self.on_say = on_say
+        self.buf = ""
+
+    async def feed(self, piece: str) -> None:
+        self.buf += piece
+        while m := SENTENCE_END.search(self.buf):
+            sentence, self.buf = self.buf[:m.end()], self.buf[m.end():]
+            await self._say(sentence)
+
+    async def flush(self) -> None:
+        rest, self.buf = self.buf, ""
+        await self._say(rest)
+
+    async def _say(self, text: str) -> None:
+        text = clean_speech(text)
+        if text.strip("().… ").lower() not in SILENT:
+            await self.on_say(text)
+
+    def watch(self, tools: list[ToolSpec]) -> list[ToolSpec]:
+        """Text written before a tool call is thinking out loud, not speech: drop what wasn't said yet."""
+        def wrap(spec: ToolSpec) -> ToolSpec:
+            async def handler(args):
+                self.buf = ""
+                return await spec.handler(args)
+            return ToolSpec(spec.name, spec.description, spec.schema, handler)
+        return [wrap(t) for t in tools]
+
+
 class Charlotte:
     def __init__(self, store: Store, agent, claude: LLMProvider, model: str = "sonnet"):
         self.store = store
@@ -184,7 +223,7 @@ class Charlotte:
         prepare = getattr(self.claude, "prepare", None)
         if prepare is None:
             return
-        claude_options.set(ClaudeOptions(model=self.model, effort="low"))
+        claude_options.set(ClaudeOptions(model=self.model, effort="low", think=False))
         turn = self.agent._turn(uid, datetime.now(timezone.utc))
         meeting = Meeting(started=turn.now)
         await prepare(SYSTEM_PROMPT, self._tools(uid, turn, meeting, Result(say="")))
@@ -193,7 +232,9 @@ class Charlotte:
         return self.store.q1("SELECT 1 FROM charlotte_journal WHERE user_id=? LIMIT 1", (uid,)) is not None
 
     async def event(self, uid: int, kind: str, said: str = "", game: dict[str, Any] | None = None,
-                    now: datetime | None = None) -> Result:
+                    now: datetime | None = None, on_say=None) -> Result:
+        """One turn of hers. `on_say(sentence)`, if given, gets each sentence as soon as it's written,
+        so the voice can start before she has finished thinking."""
         if kind not in EVENTS:
             raise ValueError(f"unknown event {kind!r}")
         now = now or datetime.now(timezone.utc)
@@ -217,10 +258,18 @@ class Charlotte:
         if meeting.first and kind != "first_meeting":
             prompt += "\n" + FIRST_MEETING_GOING
         prompt += "\n</event>"
-        claude_options.set(ClaudeOptions(model=self.model, effort="low"))
-        reply = await self.claude.run(SYSTEM_PROMPT, prompt, self._tools(uid, turn, meeting, result))
+        claude_options.set(ClaudeOptions(model=self.model, effort="low", think=False))
+        tools = self._tools(uid, turn, meeting, result)
+        if on_say is not None and "on_text" in inspect.signature(self.claude.run).parameters:
+            speaker = _Sentences(on_say)
+            reply = await self.claude.run(SYSTEM_PROMPT, prompt, speaker.watch(tools), on_text=speaker.feed)
+            await speaker.flush()
+        else:
+            reply = await self.claude.run(SYSTEM_PROMPT, prompt, tools)
+            if on_say is not None and clean_speech(reply).strip("().… ").lower() not in SILENT:
+                await on_say(clean_speech(reply))
         result.say = clean_speech(reply)
-        if result.say.strip("().… ").lower() in ("", "nothing", "silence", "no reply"):
+        if result.say.strip("().… ").lower() in SILENT:
             result.say = ""
         if result.say:
             meeting.lines.append(f"Charlotte: {result.say}")

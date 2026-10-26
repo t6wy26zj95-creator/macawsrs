@@ -80,6 +80,24 @@ class Bot:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
 
+    def _stream(self, path: str, data: bytes, ctype: str = "application/json", timeout: int = 90):
+        """Her reply as it comes: one JSON object per line ({"heard"}, {"say"} per sentence, {"done"})."""
+        req = urllib.request.Request(self.base + path + "?stream=1", data=data, method="POST")
+        req.add_header("Authorization", "Bearer " + self.token)
+        req.add_header("Content-Type", ctype)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            for line in r:
+                line = line.strip()
+                if line:
+                    yield json.loads(line.decode("utf-8"))
+
+    def event_stream(self, kind: str, game: dict, said: str = ""):
+        return self._stream("event", json.dumps({"event": kind, "said": said, "game": game}).encode("utf-8"))
+
+    def hear_stream(self, wav: bytes, game: dict):
+        body, ctype = self._form(wav, game)
+        return self._stream("hear", body, ctype)
+
     def ready(self) -> dict:
         return self._send("ready", b"{}", timeout=20)
 
@@ -91,6 +109,10 @@ class Bot:
         return self._send("event", body)
 
     def hear(self, wav: bytes, game: dict) -> dict:
+        body, ctype = self._form(wav, game)
+        return self._send("hear", body, ctype)
+
+    def _form(self, wav: bytes, game: dict) -> tuple[bytes, str]:
         boundary = uuid.uuid4().hex
         parts = [
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"game\"\r\n\r\n".encode() + json.dumps(game).encode(),
@@ -98,7 +120,7 @@ class Bot:
             "Content-Type: audio/wav\r\n\r\n".encode() + wav,
         ]
         body = b"\r\n".join(parts) + f"\r\n--{boundary}--\r\n".encode()
-        return self._send("hear", body, f"multipart/form-data; boundary={boundary}")
+        return body, f"multipart/form-data; boundary={boundary}"
 
 
 # ---------------- the helper ----------------
@@ -196,31 +218,6 @@ class Helper:
             except Exception:
                 log.exception("job failed")
 
-    def answer(self, reply: dict, got: float | None = None) -> None:
-        """Speaks her reply and does what she decided."""
-        say = (reply.get("say") or "").strip()
-        waited = 0.0
-        while self.in_menu() and self.state != IDLE and waited < 600:
-            time.sleep(0.3)  # she waits until you're back from the menu
-            waited += 0.3
-        if say and self.state != IDLE:
-            log.info("Charlotte: %s", say)
-            self.ears.paused = True
-            try:
-                self.voice.say(say, self.where_she_is,
-                               on_start=lambda: got and log.info("(voice ready after %.1fs more)", time.monotonic() - got))
-            finally:
-                self.ears.paused = False
-        action = reply.get("action") or "stay"
-        if self.state == IDLE:
-            return
-        try:
-            self.call("chl_action", action)
-        except Exception as e:
-            log.warning("couldn't tell the game %s: %s", action, e)
-        if action == "leave":
-            self.end_visit()
-
     def keep_face(self) -> None:
         """The same face every visit: remember the first one she had, put it back on later visits."""
         saved = self.cfg["game"]["appearance"]
@@ -259,19 +256,58 @@ class Helper:
             self.voice.react(self.where_she_is)
 
         def job():
-            reply = self.bot.hear(wav, self.game_info())
-            got = time.monotonic()
-            if reply.get("heard"):
-                log.info("You: %s", reply["heard"])
-            t = reply.get("timing") or {}
-            log.info("(reply after %.1fs: hearing %ss, thinking %ss, the rest is the connection)",
-                     got - stopped, t.get("hearing", "?"), t.get("thinking", "?"))
-            self.answer(reply, got)
+            self.speak_stream(self.bot.hear_stream(wav, self.game_info()), stopped)
 
         self.jobs.put(job)
 
     def send_event(self, kind: str) -> None:
-        self.jobs.put(lambda: self.answer(self.bot.event(kind, self.game_info())))
+        self.jobs.put(lambda: self.speak_stream(self.bot.event_stream(kind, self.game_info()), time.monotonic()))
+
+    def speak_stream(self, replies, since: float) -> None:
+        """Speaks her sentences as they arrive (the next one is voiced while the current one plays),
+        then does what she decided."""
+        speaker = self.voice.speaker(self.where_she_is)
+        done: dict = {}
+        first = True
+        self.ears.paused = True
+        try:
+            for obj in replies:
+                if "heard" in obj:
+                    log.info("You: %s", obj["heard"])
+                elif "done" in obj or "action" in obj:  # the end (or an older bot that answers all at once)
+                    done = obj.get("done") or obj
+                    if "action" in obj and obj.get("say"):
+                        speaker.add(obj["say"])
+                        log.info("Charlotte: %s", obj["say"])
+                elif "say" in obj and self.state != IDLE:
+                    if first:
+                        log.info("(first words after %.1fs)", time.monotonic() - since)
+                        first = False
+                    self.wait_for_menu()
+                    log.info("Charlotte: %s", obj["say"])
+                    speaker.add(obj["say"])
+            speaker.finish()
+        finally:
+            speaker.stop()
+            self.ears.paused = False
+        t = done.get("timing") or {}
+        if t:
+            log.info("(hearing %ss, thinking %ss)", t.get("hearing", "-"), t.get("thinking", "?"))
+        if self.state == IDLE:
+            return
+        action = done.get("action") or "stay"
+        try:
+            self.call("chl_action", action)
+        except Exception as e:
+            log.warning("couldn't tell the game %s: %s", action, e)
+        if action == "leave":
+            self.end_visit()
+
+    def wait_for_menu(self) -> None:
+        waited = 0.0
+        while self.in_menu() and self.state != IDLE and waited < 600:
+            time.sleep(0.3)  # she waits until you're back from the menu
+            waited += 0.3
 
     # ----- the main loop -----
 

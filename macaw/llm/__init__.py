@@ -55,6 +55,7 @@ class ClaudeOptions:
     model: str | None = None  # "opus", "sonnet", "haiku"; None = CLAUDE_MODEL from .env
     effort: str | None = None  # "high", "medium", "low"; None = Claude's default (high)
     warm: bool = True  # keep the next Claude Code process started and waiting
+    think: bool = True  # False: no extended thinking at all (fastest first words, for spoken replies)
 
 
 # Set by Models.for_user for the turn being run; the Claude provider reads it.

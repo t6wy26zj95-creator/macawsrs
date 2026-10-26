@@ -20,6 +20,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    StreamEvent,
     TextBlock,
     create_sdk_mcp_server,
     tool,
@@ -98,7 +99,7 @@ class ClaudeCodeProvider:
 
     def _key(self, system: str, tools: list[ToolSpec], opts: ClaudeOptions) -> tuple:
         sig = json.dumps([[t.name, t.description, t.schema] for t in tools], sort_keys=True)
-        return (system, sig, self._model_for(opts), opts.effort)
+        return (system, sig, self._model_for(opts), opts.effort, opts.think)
 
     async def _start(self, system: str, tools: list[ToolSpec], opts: ClaudeOptions) -> _Ready:
         ready = _Ready({t.name: t for t in tools})
@@ -121,6 +122,8 @@ class ClaudeCodeProvider:
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             },
             extra_args={"no-session-persistence": None},
+            thinking=None if opts.think else {"type": "disabled"},
+            include_partial_messages=True,  # text as it's written, for callers that speak it right away
         )
         ready.client = ClaudeSDKClient(options=options)
         await ready.client.connect()
@@ -185,7 +188,9 @@ class ClaudeCodeProvider:
                 await self._close(self._ready.pop(old))
         self._background(self._warm(key, system, tools, opts))
 
-    async def run(self, system: str, prompt: str, tools: list[ToolSpec], must_use_tool: bool = False) -> str:
+    async def run(self, system: str, prompt: str, tools: list[ToolSpec], must_use_tool: bool = False,
+                  on_text=None) -> str:
+        """`on_text(piece)`, if given, gets the reply's text as Claude writes it."""
         # Claude grades reliably from the system prompt, so must_use_tool isn't needed.
         if not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
             log.warning("CLAUDE_CODE_OAUTH_TOKEN is not set; Claude Code will use any stored login")
@@ -210,7 +215,7 @@ class ClaudeCodeProvider:
                     ready = await self._start(system, tools, opts)
                 started = time.monotonic() - t0
                 ready.handlers.update({t.name: t for t in tools})
-                texts, result = await self._turn(ready.client, prompt)
+                texts, result = await self._turn(ready.client, prompt, on_text)
             except Exception as e:
                 # The waiting process may have died; start a fresh one, unless a tool already ran.
                 if not was_waiting or ready is None or ready.ran:
@@ -220,7 +225,7 @@ class ClaudeCodeProvider:
                 was_waiting = False
                 ready = await self._start(system, tools, opts)
                 started = time.monotonic() - t0
-                texts, result = await self._turn(ready.client, prompt)
+                texts, result = await self._turn(ready.client, prompt, on_text)
             elapsed = time.monotonic() - t0
         except Exception as e:
             raise LLMError(str(e)) from e
@@ -255,12 +260,17 @@ class ClaudeCodeProvider:
         return reply
 
     @staticmethod
-    async def _turn(client: ClaudeSDKClient, prompt: str) -> tuple[list[str], ResultMessage | None]:
+    async def _turn(client: ClaudeSDKClient, prompt: str, on_text=None) -> tuple[list[str], ResultMessage | None]:
         texts: list[str] = []
         result: ResultMessage | None = None
         await client.query(prompt)
         async for msg in client.receive_response():
-            if isinstance(msg, AssistantMessage):
+            if isinstance(msg, StreamEvent):
+                ev = msg.event or {}
+                delta = ev.get("delta") or {}
+                if on_text and ev.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
+                    await on_text(delta.get("text") or "")
+            elif isinstance(msg, AssistantMessage):
                 turn_text = "".join(b.text for b in msg.content if isinstance(b, TextBlock))
                 if turn_text.strip():
                     texts.append(turn_text)
