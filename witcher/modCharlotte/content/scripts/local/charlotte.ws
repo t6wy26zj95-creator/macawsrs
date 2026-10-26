@@ -14,6 +14,12 @@
 @addField(CR4Player) var chlSpawnedAt : float;
 @addField(CR4Player) var chlCalmSince : float;
 
+// thePlayer can't be assigned through from a global function, so the fields change through these.
+@addMethod(CR4Player) function CHL_SetNpc( npc : CNewNPC ) { chlNpc = npc; }
+@addMethod(CR4Player) function CHL_SetFollow( id : int ) { chlFollowId = id; }
+@addMethod(CR4Player) function CHL_SetLeaving( leaving : bool, at : float ) { chlLeaving = leaving; chlLeftAt = at; }
+@addMethod(CR4Player) function CHL_SetSpawnedAt( at : float ) { chlSpawnedAt = at; }
+
 @wrapMethod(CR4Player) function OnSpawned( spawnData : SEntitySpawnData )
 {
 	var result : bool;
@@ -89,6 +95,19 @@ function CHL_Weather() : string
 	return "cloudy";
 }
 
+// A spot `dist` metres behind the camera on the ground, at about Geralt's height.
+function CHL_Behind( dist : float ) : Vector
+{
+	var dir, pos : Vector;
+
+	dir = theCamera.GetCameraDirection();
+	dir.Z = 0;
+	dir = VecNormalize( dir );
+	pos = thePlayer.GetWorldPosition() - dir * dist;
+	pos.Z = thePlayer.GetWorldPosition().Z;
+	return CHL_Ground( pos );
+}
+
 function CHL_Ground( pos : Vector ) : Vector
 {
 	var hit, normal : Vector;
@@ -104,7 +123,7 @@ function CHL_StopFollowing()
 	{
 		thePlayer.chlNpc.CancelAIBehavior( thePlayer.chlFollowId );
 	}
-	thePlayer.chlFollowId = 0;
+	thePlayer.CHL_SetFollow( 0 );
 }
 
 function CHL_Remove()
@@ -114,8 +133,8 @@ function CHL_Remove()
 	{
 		thePlayer.chlNpc.Destroy();
 	}
-	thePlayer.chlNpc = NULL;
-	thePlayer.chlLeaving = false;
+	thePlayer.CHL_SetNpc( NULL );
+	thePlayer.CHL_SetLeaving( false, 0 );
 }
 
 // ---------------- the once-a-second check ----------------
@@ -142,7 +161,7 @@ function CHL_Remove()
 	if ( dist > 60 && chlFollowId != 0 )
 	{
 		// Left far behind (fast travel, a gallop): she catches up out of view.
-		chlNpc.Teleport( CHL_Ground( GetWorldPosition() - theCamera.GetCameraDirection() * 8.0 ) );
+		chlNpc.Teleport( CHL_Behind( 8.0 ) );
 	}
 }
 
@@ -155,9 +174,16 @@ exec function chl_poll( seq : int, optional full : int )
 	var near : int;
 	var busy : string;
 	var journal : CWitcherJournalManager;
-	var quest : CJournalQuest;
+	var tracked : CJournalQuest;
 	var goal : CJournalQuestObjective;
 
+	// Main menu or a loading screen: no player to ask about yet.
+	if ( !thePlayer || !GetWitcherPlayer() || !theGame.GetCommonMapManager() || !theGame.GetGuiManager() )
+	{
+		CHL_Line( seq, "st ingame 0 calmfor 0 danger 1 her 0 follow 0" );
+		CHL_End( seq );
+		return;
+	}
 	busy = CHL_Busy();
 	calmFor = 0;
 	if ( thePlayer.chlCalmSince > 0 )
@@ -166,21 +192,27 @@ exec function chl_poll( seq : int, optional full : int )
 	if ( thePlayer.chlNpc )
 		near = FloorF( VecDistance( thePlayer.chlNpc.GetWorldPosition(), thePlayer.GetWorldPosition() ) * 10 );
 
-	CHL_Line( seq, "st calmfor " + IntToString( calmFor ) + " danger " + CHL_B( CHL_Danger() )
+	CHL_Line( seq, "st ingame 1 calmfor " + IntToString( calmFor ) + " danger " + CHL_B( CHL_Danger() )
 		+ " settle " + CHL_B( thePlayer.IsInSettlement() ) + " level " + IntToString( GetWitcherPlayer().GetLevel() )
 		+ " coin " + IntToString( thePlayer.GetInventory().GetMoney() )
 		+ " hour " + IntToString( GameTimeHours( theGame.GetGameTime() ) )
 		+ " her " + CHL_B( CHL_Here() ) + " near10 " + IntToString( near )
 		+ " follow " + CHL_B( thePlayer.chlFollowId != 0 ) );
 	CHL_Line( seq, "busy " + busy );
+	if ( thePlayer.chlNpc )
+	{
+		// Where she is from the camera's point of view, so the helper can place her voice.
+		CHL_Line( seq, "ear " + CHL_Pos10( thePlayer.chlNpc.GetWorldPosition() + Vector( 0, 0, 1.6 ) )
+			+ " " + CHL_Pos10( thePlayer.GetWorldPosition() + Vector( 0, 0, 1.6 ) ) + " " + CHL_Pos10( theCamera.GetCameraDirection() ) );
+	}
 	CHL_Line( seq, "area " + NameToString( theGame.GetCommonMapManager().GetCurrentJournalAreaByPosition( thePlayer.GetWorldPosition() ) ) );
 	CHL_Line( seq, "weather " + CHL_Weather() );
 	if ( full == 1 )
 	{
 		journal = theGame.GetJournalManager();
-		quest = journal.GetTrackedQuest();
-		if ( quest )
-			CHL_Line( seq, "quest " + GetLocStringById( quest.GetTitleStringId() ) );
+		tracked = journal.GetTrackedQuest();
+		if ( tracked )
+			CHL_Line( seq, "quest " + GetLocStringById( tracked.GetTitleStringId() ) );
 		goal = journal.GetHighlightedObjective();
 		if ( goal )
 			CHL_Line( seq, "goal " + GetLocStringById( goal.GetTitleStringId() ) );
@@ -193,9 +225,8 @@ exec function chl_story( seq : int, offset : int )
 {
 	var journal : CWitcherJournalManager;
 	var entries : array<CJournalBase>;
-	var quest : CJournalQuest;
+	var tracked : CJournalQuest;
 	var i, found, shown : int;
-	var kind : int;
 
 	journal = theGame.GetJournalManager();
 	journal.GetActivatedOfType( 'CJournalQuest', entries );
@@ -203,15 +234,15 @@ exec function chl_story( seq : int, offset : int )
 	shown = 0;
 	for ( i = 0; i < entries.Size(); i += 1 )
 	{
-		quest = (CJournalQuest)entries[i];
-		if ( !quest || journal.GetEntryStatus( quest ) != JS_Success )
+		tracked = (CJournalQuest)entries[i];
+		if ( !tracked || journal.GetEntryStatus( tracked ) != JS_Success )
 			continue;
-		kind = quest.GetType();
-		if ( kind != 0 && kind != 1 && kind != 6 && kind != 7 )
+		// story quests only (the journal's main and chapter types), like the game's own quest list does
+		if ( tracked.GetType() != 0 && tracked.GetType() != 1 && tracked.GetType() != 6 && tracked.GetType() != 7 )
 			continue;
 		if ( found >= offset && shown < 12 )
 		{
-			CHL_Line( seq, "done " + GetLocStringById( quest.GetTitleStringId() ) );
+			CHL_Line( seq, "done " + GetLocStringById( tracked.GetTitleStringId() ) );
 			shown += 1;
 		}
 		found += 1;
@@ -230,17 +261,20 @@ exec function chl_spawn( seq : int, template : string )
 
 	if ( thePlayer.chlNpc )
 		CHL_Remove();
-	res = (CEntityTemplate)LoadResource( template );
+	if ( StrFindFirst( template, ".w2ent" ) >= 0 )
+		res = (CEntityTemplate)LoadResource( template, true );  // a full path to a .w2ent
+	else
+		res = (CEntityTemplate)LoadResource( template );  // a short name from the game's list
 	if ( !res )
 	{
 		CHL_Line( seq, "error no-template" );
 		CHL_End( seq );
 		return;
 	}
-	pos = CHL_Ground( thePlayer.GetWorldPosition() - theCamera.GetCameraDirection() * 18.0 );
+	pos = CHL_Behind( 18.0 );
 	rot = thePlayer.GetWorldRotation();
 	ent = theGame.CreateEntity( res, pos, rot );
-	thePlayer.chlNpc = (CNewNPC)ent;
+	thePlayer.CHL_SetNpc( (CNewNPC)ent );
 	if ( !thePlayer.chlNpc )
 	{
 		if ( ent )
@@ -252,9 +286,9 @@ exec function chl_spawn( seq : int, template : string )
 	thePlayer.chlNpc.AddTag( 'chl_charlotte' );
 	thePlayer.chlNpc.SetTemporaryAttitudeGroup( 'friendly_to_player', AGP_Default );
 	thePlayer.chlNpc.SetImmortalityMode( AIM_Invulnerable, AIC_Default );
-	thePlayer.chlLeaving = false;
-	thePlayer.chlFollowId = 0;
-	thePlayer.chlSpawnedAt = CHL_Now();
+	thePlayer.CHL_SetLeaving( false, 0 );
+	thePlayer.CHL_SetFollow( 0 );
+	thePlayer.CHL_SetSpawnedAt( CHL_Now() );
 	thePlayer.chlNpc.ActionMoveToDynamicNodeAsync( thePlayer, MT_Walk, 1.0, 2.2 );
 	CHL_Line( seq, "spawned 1" );
 	CHL_End( seq );
@@ -276,7 +310,7 @@ exec function chl_closer( seq : int )
 {
 	if ( thePlayer.chlNpc )
 	{
-		thePlayer.chlNpc.Teleport( CHL_Ground( thePlayer.GetWorldPosition() - theCamera.GetCameraDirection() * 5.0 ) );
+		thePlayer.chlNpc.Teleport( CHL_Behind( 5.0 ) );
 		thePlayer.chlNpc.ActionMoveToDynamicNodeAsync( thePlayer, MT_Walk, 1.0, 2.2 );
 	}
 	CHL_End( seq );
@@ -299,7 +333,7 @@ exec function chl_action( seq : int, action : string )
 		ai = new CAIFollowSideBySideAction in thePlayer.chlNpc;
 		ai.OnCreated();
 		ai.params.targetTag = 'chl_geralt';
-		thePlayer.chlFollowId = thePlayer.chlNpc.ForceAIBehavior( ai, BTAP_Emergency );
+		thePlayer.CHL_SetFollow( thePlayer.chlNpc.ForceAIBehavior( ai, BTAP_Emergency ) );
 	}
 	else if ( action == "wait" || action == "stay" )
 	{
@@ -312,8 +346,7 @@ exec function chl_action( seq : int, action : string )
 		CHL_StopFollowing();
 		thePlayer.chlNpc.DisableLookAt();
 		thePlayer.chlNpc.ActionMoveAwayFromNodeAsync( thePlayer, 40, MT_Walk );
-		thePlayer.chlLeaving = true;
-		thePlayer.chlLeftAt = CHL_Now();
+		thePlayer.CHL_SetLeaving( true, CHL_Now() );
 	}
 	else if ( action == "vanish" )
 	{
@@ -327,6 +360,35 @@ exec function chl_action( seq : int, action : string )
 exec function chl_note( seq : int, text : string )
 {
 	theGame.GetGuiManager().ShowNotification( text );
+	CHL_End( seq );
+}
+
+// x,y,z in tenths of a metre (or of a unit, for a direction).
+function CHL_Pos10( v : Vector ) : string
+{
+	return IntToString( RoundF( v.X * 10 ) ) + " " + IntToString( RoundF( v.Y * 10 ) ) + " " + IntToString( RoundF( v.Z * 10 ) );
+}
+
+function CHL_Pos( v : Vector ) : string
+{
+	return IntToString( FloorF( v.X ) ) + "," + IntToString( FloorF( v.Y ) ) + "," + IntToString( FloorF( v.Z ) );
+}
+
+// Where she is and whether she can be seen, for the log.
+exec function chl_where( seq : int )
+{
+	var her, me : Vector;
+
+	if ( thePlayer.chlNpc )
+	{
+		her = thePlayer.chlNpc.GetWorldPosition();
+		me = thePlayer.GetWorldPosition();
+		CHL_Line( seq, "where her " + CHL_Pos( her ) + " me " + CHL_Pos( me )
+			+ " look " + NameToString( thePlayer.chlNpc.GetAppearance() )
+			+ " visible " + CHL_B( thePlayer.chlNpc.GetVisibility() ) );
+	}
+	else
+		CHL_Line( seq, "where none" );
 	CHL_End( seq );
 }
 

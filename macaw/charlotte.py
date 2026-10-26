@@ -56,8 +56,10 @@ WHO YOU ARE
   the quests listed as finished. If he asks about what comes next, be playfully mysterious.
 
 HOW YOU SPEAK
-- Spoken words only: one to three short sentences per reply, plain text, no lists, no emoji, no stage
-  directions, no asterisks, no quotation marks around your whole reply.
+- This is a real back-and-forth conversation, not a speech. Usually ONE or TWO short sentences per
+  reply (about 30 words at most), then let him talk. Never a monologue, never several ideas at once.
+- Spoken words only: plain text, no lists, no emoji, no stage directions, no asterisks, no quotation
+  marks around your whole reply.
 - English, natural and clear, since he is learning it. If he speaks another language, answer in
   English unless he asks otherwise.
 - Speech-to-text can mishear him. If what he said makes no sense, ask him to repeat instead of guessing.
@@ -88,12 +90,17 @@ YOUR MEMORY
 """
 
 FIRST_MEETING = (
-    "This is your FIRST meeting with Geralt. You stop him in the street of a town. Greet him, introduce "
-    "yourself (Charlotte of Oxenfurt Academy), explain your treatise and why his lost and recovered memory "
-    "fascinates you, and offer the contract: every so often you'll find him, ask him a few things, and pay "
-    "him for his time. Keep this first line to four sentences at most; let him answer before you go on. "
-    "Something like: \"Geralt of Rivia? Forgive me. I've read so much about you, I feel we've already met. "
-    "Which, in your case, is rather the question, isn't it?\" (in your own words)."
+    "This is your FIRST meeting with Geralt: you stop him in the street of a town. Open like a real person "
+    "would, with ONE or TWO short sentences: you recognise him and say who you are, nothing more. Then stop "
+    "and let him react. Do NOT explain your treatise, the memory research, the contract or the pay yet; "
+    "that comes out bit by bit over the next replies, as he asks or as the talk allows. Something like: "
+    "\"Geralt of Rivia? I'm Charlotte, from Oxenfurt. I was hoping I'd run into you.\" (in your own words)."
+)
+
+FIRST_MEETING_GOING = (
+    "(You're still in your first meeting. Reveal what you want gradually, one piece per reply, in answer to "
+    "what he says: why you sought him out, your treatise on memory, then the offer to test him now and then "
+    "and pay him in crowns. Don't rush to the offer, and don't repeat what you've already told him.)"
 )
 
 EVENT_TEXT = {
@@ -130,6 +137,7 @@ class Meeting:
     lines: list[str] = field(default_factory=list)
     graded: set[int] = field(default_factory=set)
     active: int | None = None
+    first: bool = False  # the very first meeting, where she introduces herself bit by bit
 
 
 @dataclass
@@ -187,6 +195,8 @@ class Charlotte:
         meeting = self.meetings[uid]
         if kind == "first_meeting" and self.met(uid):
             kind = "arrive"  # the first meeting only happens once
+        if kind == "first_meeting":
+            meeting.first = True
         if kind == "speech":
             meeting.lines.append(f"Geralt: {said}")
 
@@ -194,6 +204,8 @@ class Charlotte:
         turn = self.agent._turn(uid, now)
         prompt = self._context(uid, turn, meeting, game or {}) + "\n\n<event>\n"
         prompt += FIRST_MEETING if kind == "first_meeting" else EVENT_TEXT[kind].format(said=said)
+        if meeting.first and kind != "first_meeting":
+            prompt += "\n" + FIRST_MEETING_GOING
         prompt += "\n</event>"
         claude_options.set(ClaudeOptions(model=self.model, effort="low"))
         reply = await self.claude.run(SYSTEM_PROMPT, prompt, self._tools(uid, turn, meeting, result))

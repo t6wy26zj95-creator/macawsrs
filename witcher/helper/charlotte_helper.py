@@ -20,7 +20,7 @@ import urllib.request
 import uuid
 
 from pad import MuteButton, names
-from voice import Ears, Voice
+from voice import Ears, Voice, place_voice
 from w3link import GameLink, GameNotRunning, parse_fields
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,7 +30,7 @@ log = logging.getLogger("charlotte")
 DEFAULTS = {
     "bot": {"code": ""},
     "game": {"folder": r"C:\games\The Witcher 3 Wild Hunt GOTY", "start_game": "yes", "look": "sorceress"},
-    "voice": {"voice": "en-GB-SoniaNeural", "speed": "+0%"},
+    "voice": {"voice": "en-GB-SoniaNeural", "speed": "+0%", "swap_sides": "no"},
     "mute": {"combo": "LEFT_STICK+RIGHT_STICK", "key": "F9"},
     "timing": {"calm_seconds": "120", "minutes_between": "25", "quiet_nudge_seconds": "120"},
 }
@@ -45,7 +45,7 @@ REGIONS = {
 
 
 def load_config() -> configparser.ConfigParser:
-    cfg = configparser.ConfigParser()
+    cfg = configparser.ConfigParser(interpolation=None)
     cfg.read_dict(DEFAULTS)
     cfg.read(CONFIG, encoding="utf-8")
     return cfg
@@ -94,6 +94,11 @@ class Bot:
 
 # ---------------- the helper ----------------
 
+MIC_HELP = ("Couldn't open your microphone, so Charlotte won't hear you yet. The helper keeps running and tries "
+            "again every 30 seconds.\nThe usual cause: Windows blocks the mic for desktop apps. Open Settings > "
+            "Privacy & security > Microphone and turn on 'Microphone access' and 'Let desktop apps access your "
+            "microphone'. Also check your headset is plugged in and set as the input in Settings > System > Sound.")
+
 IDLE, APPROACH, TALK = "idle", "approach", "talk"
 
 
@@ -113,6 +118,7 @@ class Helper:
         self.due = 0
         self.met = False
         self.status_at = 0.0
+        self.reported_at = 0.0
         self.next_visit = 0.0  # no visit before this time
         self.spawned_at = 0.0
         self.last_heard = 0.0
@@ -184,11 +190,15 @@ class Helper:
     def answer(self, reply: dict) -> None:
         """Speaks her reply and does what she decided."""
         say = (reply.get("say") or "").strip()
+        waited = 0.0
+        while self.in_menu() and self.state != IDLE and waited < 600:
+            time.sleep(0.3)  # she waits until you're back from the menu
+            waited += 0.3
         if say and self.state != IDLE:
             log.info("Charlotte: %s", say)
             self.ears.paused = True
             try:
-                self.voice.say(say)
+                self.voice.say(say, self.where_she_is)
             finally:
                 self.ears.paused = False
         action = reply.get("action") or "stay"
@@ -200,6 +210,15 @@ class Helper:
             log.warning("couldn't tell the game %s: %s", action, e)
         if action == "leave":
             self.end_visit()
+
+    def where_she_is(self) -> tuple[float, float]:
+        left, right = place_voice(self.fields.get("ear", ""))
+        if self.cfg["voice"].getboolean("swap_sides"):
+            left, right = right, left
+        return left, right
+
+    def in_menu(self) -> bool:
+        return self.fields.get("busy") in ("menu", "paused", "fading")
 
     def end_visit(self) -> None:
         self.state = IDLE
@@ -234,21 +253,47 @@ class Helper:
             and time.time() >= self.next_visit and self.due > 0
         )
 
+    def why_not(self) -> str:
+        """What is still missing for a visit, in plain words (printed every 30 s while she isn't around)."""
+        f, missing = self.fields, []
+        calm = int(f.get("calmfor", "0"))
+        if calm < self.calm_seconds:
+            missing.append(f"calm for {calm} of {self.calm_seconds} seconds")
+        if f.get("danger") != "0":
+            missing.append("danger nearby (fight, enemies, dialogue or cutscene)")
+        if f.get("settle") != "1":
+            missing.append("not in a town or village")
+        if f.get("busy"):
+            missing.append("busy: " + f["busy"])
+        if self.due <= 0:
+            missing.append("no cards due")
+        wait = int(self.next_visit - time.time())
+        if wait > 0:
+            missing.append(f"next visit allowed in {wait // 60} min")
+        return "; ".join(missing) or "ready, she's coming"
+
     def tick(self) -> None:
         self.poll()
         f = self.fields
         now = time.time()
+        if f.get("ingame") == "0":  # main menu or loading
+            self.state = IDLE
+            self.ears.enabled = False
+            return
         if self.state == IDLE:
             if now - self.status_at > 180:
                 s = self.bot.status()
                 self.due, self.met, self.status_at = s.get("due", 0), s.get("met", False), now
+            if now - self.reported_at >= 30:
+                self.reported_at = now
+                log.info("Waiting for a visit: %s", self.why_not())
             if self.visit_allowed():
                 lines = self.call("chl_spawn", self.cfg["game"]["look"])
                 if any(line.startswith("error") for line in lines):
                     log.warning("Charlotte couldn't appear: %s", lines)
                     self.next_visit = now + 300
                     return
-                log.info("Charlotte is on her way")
+                log.info("Charlotte is on her way: %s", " ".join(self.call("chl_where")))
                 self.state, self.spawned_at = APPROACH, now
             return
 
@@ -264,6 +309,7 @@ class Helper:
         near = int(f.get("near10", "-1"))
         if self.state == APPROACH:
             if 0 <= near <= 35:
+                log.info("Charlotte arrived: %s", " ".join(self.call("chl_where")))
                 self.call("chl_face")
                 self.poll(full=True)
                 self.read_story()
@@ -290,6 +336,10 @@ class Helper:
                 return
         else:
             self.away_since = None
+        self.ears.enabled = not self.muted and not self.in_menu()
+        if self.in_menu():
+            self.last_heard = now  # time in a menu doesn't count as silence
+            return
         if not self.nudged and now - self.last_heard > self.quiet_nudge and self.jobs.empty():
             self.nudged = True
             self.send_event("silence")
@@ -304,20 +354,32 @@ class Helper:
 
     def run(self) -> None:
         threading.Thread(target=self.worker, daemon=True).start()
-        self.ears.start()
+        mic_tried = time.time()
+        if self.ears.start():
+            log.info("mic ready")
+        else:
+            print(MIC_HELP + "\n(" + self.ears.error + ")")
         last_tick = 0.0
         waiting_said = False
+        greeted = False
         while True:
             if self.mute.pressed():
                 self.toggle_mute()
+            if self.ears.stream is None and time.time() - mic_tried > 30:
+                mic_tried = time.time()
+                if self.ears.start():
+                    print("The mic works now.")
             if time.time() - last_tick >= 1.0:
                 last_tick = time.time()
                 try:
                     self.tick()
                     if waiting_said:
-                        print("Connected to the game. Charlotte will find you at a calm moment in a town.")
-                        self.call("chl_note", "Charlotte is in the world")
+                        log.info("Connected to the game. Charlotte will find you at a calm moment in a town.")
                         waiting_said = False
+                        greeted = False
+                    if not greeted and self.fields.get("ingame") == "1":
+                        self.call("chl_note", "Charlotte is in the world")
+                        greeted = True
                 except GameNotRunning:
                     if not waiting_said:
                         print("Waiting for the game...")
