@@ -47,6 +47,9 @@ class Ears:
         self.error = ""
         self.floor = 300.0  # background loudness, learned as it goes
         self.stream = None
+        self.name = "?"
+        self.peak = 0.0  # loudest 30 ms since the last report, to see in the log what the mic hears
+        self.frames = 0  # frames since the last report; none means the mic stopped sending sound
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> bool:
@@ -60,10 +63,35 @@ class Ears:
                 self.error = str(e)
                 continue
             self.stream, self.in_rate, self.device = stream, rate, device
+            try:
+                self.name = sd.query_devices(device if device is not None else sd.default.device[0])["name"]
+            except Exception:
+                self.name = "?"
             if not self.thread.is_alive():
                 self.thread.start()
             return True
         return False
+
+    def threshold(self) -> float:
+        return max(self.floor * 2.5, 250.0)
+
+    def report(self) -> str:
+        """One log line on what the mic heard lately, then starts counting again."""
+        out = (f"mic '{self.name}': loudest {self.peak:.0f}, talking starts above {self.threshold():.0f}, "
+               f"{self.frames} sound frames")
+        self.peak, self.frames = 0.0, 0
+        return out
+
+    def restart(self) -> bool:
+        """The mic stopped sending sound (unplugged, Bluetooth dropped): open it again."""
+        if self.stream is not None:
+            try:
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+        self.device = None  # whatever Windows uses as the mic now
+        return self.start()
 
     def _options(self):
         """Ways to open the mic, most likely to work first: the chosen or default mic at its own rate,
@@ -121,11 +149,13 @@ class Ears:
         loud = 0
         quiet_since = None
         for frame in self._frames():
+            self.frames += 1
             if not self.enabled or self.paused:
                 before, speech, loud, quiet_since = [], [], 0, None
                 continue
             level = float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
-            threshold = max(self.floor * 3.0, 500.0)
+            threshold = self.threshold()
+            self.peak = max(self.peak, level)
             if not speech:
                 before = (before + [frame])[-PRE_ROLL:]
                 loud = loud + 1 if level > threshold else 0

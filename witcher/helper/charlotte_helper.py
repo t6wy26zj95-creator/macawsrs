@@ -406,6 +406,13 @@ class Helper:
         else:
             self.away_since = None
         self.ears.enabled = not self.muted and not self.in_menu()
+        if now - self.reported_at >= 30:
+            self.reported_at = now
+            if self.ears.stream is not None and self.ears.frames == 0:
+                log.info("the mic stopped sending sound; opening it again")
+                if self.ears.restart():
+                    log.info("mic ready: %s", self.ears.name)
+            log.info("%s%s", self.ears.report(), " (muted)" if self.muted else "")
         if self.in_menu():
             self.last_heard = now  # time in a menu doesn't count as silence
             return
@@ -426,7 +433,7 @@ class Helper:
         self.voice.prepare_reactions()
         mic_tried = time.time()
         if self.ears.start():
-            log.info("mic ready")
+            log.info("mic ready: %s", self.ears.name)
         else:
             print(MIC_HELP + "\n(" + self.ears.error + ")")
         last_tick = 0.0
