@@ -118,6 +118,7 @@ class Helper:
         self.due = 0
         self.met = False
         self.status_at = 0.0
+        self.reported_at = 0.0
         self.next_visit = 0.0  # no visit before this time
         self.spawned_at = 0.0
         self.last_heard = 0.0
@@ -239,6 +240,25 @@ class Helper:
             and time.time() >= self.next_visit and self.due > 0
         )
 
+    def why_not(self) -> str:
+        """What is still missing for a visit, in plain words (printed every 30 s while she isn't around)."""
+        f, missing = self.fields, []
+        calm = int(f.get("calmfor", "0"))
+        if calm < self.calm_seconds:
+            missing.append(f"calm for {calm} of {self.calm_seconds} seconds")
+        if f.get("danger") != "0":
+            missing.append("danger nearby (fight, enemies, dialogue or cutscene)")
+        if f.get("settle") != "1":
+            missing.append("not in a town or village")
+        if f.get("busy"):
+            missing.append("busy: " + f["busy"])
+        if self.due <= 0:
+            missing.append("no cards due")
+        wait = int(self.next_visit - time.time())
+        if wait > 0:
+            missing.append(f"next visit allowed in {wait // 60} min")
+        return "; ".join(missing) or "ready, she's coming"
+
     def tick(self) -> None:
         self.poll()
         f = self.fields
@@ -251,6 +271,9 @@ class Helper:
             if now - self.status_at > 180:
                 s = self.bot.status()
                 self.due, self.met, self.status_at = s.get("due", 0), s.get("met", False), now
+            if now - self.reported_at >= 30:
+                self.reported_at = now
+                log.info("Waiting for a visit: %s", self.why_not())
             if self.visit_allowed():
                 lines = self.call("chl_spawn", self.cfg["game"]["look"])
                 if any(line.startswith("error") for line in lines):
@@ -333,7 +356,7 @@ class Helper:
                 try:
                     self.tick()
                     if waiting_said:
-                        print("Connected to the game. Charlotte will find you at a calm moment in a town.")
+                        log.info("Connected to the game. Charlotte will find you at a calm moment in a town.")
                         waiting_said = False
                         greeted = False
                     if not greeted and self.fields.get("ingame") == "1":
