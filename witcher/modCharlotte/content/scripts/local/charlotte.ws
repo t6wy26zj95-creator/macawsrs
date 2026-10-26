@@ -14,6 +14,12 @@
 @addField(CR4Player) var chlSpawnedAt : float;
 @addField(CR4Player) var chlCalmSince : float;
 
+// thePlayer can't be assigned through from a global function, so the fields change through these.
+@addMethod(CR4Player) function CHL_SetNpc( npc : CNewNPC ) { chlNpc = npc; }
+@addMethod(CR4Player) function CHL_SetFollow( id : int ) { chlFollowId = id; }
+@addMethod(CR4Player) function CHL_SetLeaving( leaving : bool, at : float ) { chlLeaving = leaving; chlLeftAt = at; }
+@addMethod(CR4Player) function CHL_SetSpawnedAt( at : float ) { chlSpawnedAt = at; }
+
 @wrapMethod(CR4Player) function OnSpawned( spawnData : SEntitySpawnData )
 {
 	var result : bool;
@@ -104,7 +110,7 @@ function CHL_StopFollowing()
 	{
 		thePlayer.chlNpc.CancelAIBehavior( thePlayer.chlFollowId );
 	}
-	thePlayer.chlFollowId = 0;
+	thePlayer.CHL_SetFollow( 0 );
 }
 
 function CHL_Remove()
@@ -114,8 +120,8 @@ function CHL_Remove()
 	{
 		thePlayer.chlNpc.Destroy();
 	}
-	thePlayer.chlNpc = NULL;
-	thePlayer.chlLeaving = false;
+	thePlayer.CHL_SetNpc( NULL );
+	thePlayer.CHL_SetLeaving( false, 0 );
 }
 
 // ---------------- the once-a-second check ----------------
@@ -239,7 +245,7 @@ exec function chl_spawn( seq : int, template : string )
 	pos = CHL_Ground( thePlayer.GetWorldPosition() - theCamera.GetCameraDirection() * 18.0 );
 	rot = thePlayer.GetWorldRotation();
 	ent = theGame.CreateEntity( res, pos, rot );
-	thePlayer.chlNpc = (CNewNPC)ent;
+	thePlayer.CHL_SetNpc( (CNewNPC)ent );
 	if ( !thePlayer.chlNpc )
 	{
 		if ( ent )
@@ -251,9 +257,9 @@ exec function chl_spawn( seq : int, template : string )
 	thePlayer.chlNpc.AddTag( 'chl_charlotte' );
 	thePlayer.chlNpc.SetTemporaryAttitudeGroup( 'friendly_to_player', AGP_Default );
 	thePlayer.chlNpc.SetImmortalityMode( AIM_Invulnerable, AIC_Default );
-	thePlayer.chlLeaving = false;
-	thePlayer.chlFollowId = 0;
-	thePlayer.chlSpawnedAt = CHL_Now();
+	thePlayer.CHL_SetLeaving( false, 0 );
+	thePlayer.CHL_SetFollow( 0 );
+	thePlayer.CHL_SetSpawnedAt( CHL_Now() );
 	thePlayer.chlNpc.ActionMoveToDynamicNodeAsync( thePlayer, MT_Walk, 1.0, 2.2 );
 	CHL_Line( seq, "spawned 1" );
 	CHL_End( seq );
@@ -298,7 +304,7 @@ exec function chl_action( seq : int, action : string )
 		ai = new CAIFollowSideBySideAction in thePlayer.chlNpc;
 		ai.OnCreated();
 		ai.params.targetTag = 'chl_geralt';
-		thePlayer.chlFollowId = thePlayer.chlNpc.ForceAIBehavior( ai, BTAP_Emergency );
+		thePlayer.CHL_SetFollow( thePlayer.chlNpc.ForceAIBehavior( ai, BTAP_Emergency ) );
 	}
 	else if ( action == "wait" || action == "stay" )
 	{
@@ -311,8 +317,7 @@ exec function chl_action( seq : int, action : string )
 		CHL_StopFollowing();
 		thePlayer.chlNpc.DisableLookAt();
 		thePlayer.chlNpc.ActionMoveAwayFromNodeAsync( thePlayer, 40, MT_Walk );
-		thePlayer.chlLeaving = true;
-		thePlayer.chlLeftAt = CHL_Now();
+		thePlayer.CHL_SetLeaving( true, CHL_Now() );
 	}
 	else if ( action == "vanish" )
 	{
