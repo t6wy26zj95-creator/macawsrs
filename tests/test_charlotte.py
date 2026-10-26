@@ -155,3 +155,60 @@ async def test_server_owner_only(store, tmp_path):
         assert (await r.json())["heard"] == ""
     finally:
         await c.close()
+
+
+class StreamingLLM(FakeLLM):
+    """Like FakeLLM, but writes its reply in pieces through on_text, the way Claude streams."""
+
+    def __init__(self, pieces, tool_first=None):
+        super().__init__()
+        self.pieces = pieces
+        self.tool_first = tool_first
+
+    async def run(self, system, prompt, tools, must_use_tool=False, on_text=None):
+        handlers = {t.name: t.handler for t in tools}
+        if self.tool_first:
+            await on_text("Let me look")  # an unfinished thought before a tool call: dropped, never spoken
+            await handlers[self.tool_first[0]](self.tool_first[1])
+        for p in self.pieces:
+            await on_text(p)
+        return "".join(self.pieces)
+
+
+async def test_sentences_are_spoken_as_they_are_written(store):
+    agent = Agent(store, FakeLLM())
+    her = StreamingLLM(["Hello there, Geralt. How", " are you? *smiles* I'm well", "."],
+                       tool_first=("set_action", {"action": "follow"}))
+    charlotte = Charlotte(store, agent, her)
+    said = []
+
+    async def on_say(s):
+        said.append(s)
+
+    r = await charlotte.event(UID, "arrive", game={}, now=NOW, on_say=on_say)
+    assert said == ["Hello there, Geralt.", "How are you?", "I'm well."]
+    assert r.say == "Hello there, Geralt. How are you? I'm well." and r.action == "follow"
+
+
+async def test_streamed_turn_over_http(store, tmp_path):
+    import json
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from macaw.reader import server as reader
+
+    agent = Agent(store, FakeLLM())
+    her = StreamingLLM(["Good evening. ", "Nothing", " more."])
+    srv = reader.ReaderServer("tok", lambda uid: uid == UID, reader.Library(store, tmp_path), store,
+                              charlotte=Charlotte(store, agent, her), owners=frozenset({UID}))
+    c = TestClient(TestServer(srv.build()))
+    await c.start_server()
+    try:
+        key = {"Authorization": "Bearer " + reader.make_token("tok", UID, days=365)}
+        r = await c.post("/api/charlotte/event?stream=1", headers=key, json={"event": "arrive"})
+        lines = [json.loads(x) for x in (await r.text()).splitlines()]
+        assert [x["say"] for x in lines if "say" in x] == ["Good evening.", "Nothing more."]
+        assert lines[-1]["done"]["action"] == "stay" and "thinking" in lines[-1]["done"]["timing"]
+        assert (await c.post("/api/charlotte/event?stream=1", headers=key, json={"event": "x"})).status == 400
+    finally:
+        await c.close()

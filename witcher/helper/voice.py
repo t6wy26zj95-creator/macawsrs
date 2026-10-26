@@ -233,6 +233,9 @@ class Voice:
         self.reacting = threading.Thread(target=self._play, args=(path, where), daemon=True)
         self.reacting.start()
 
+    def speaker(self, where=None) -> "Speaker":
+        return Speaker(self, where)
+
     def say(self, text: str, where=None, on_start=None) -> None:
         """Speaks `text` and returns when she's done. `where()` gives (left, right) loudness and is asked
         again while she talks, so her voice follows her as she and the camera move."""
@@ -287,3 +290,55 @@ class Voice:
             _mci(f"play {alias} wait")
         finally:
             _mci(f"close {alias}")
+
+
+class Speaker:
+    """Speaks sentences in order as they're added: the next one is voiced while the current one plays."""
+
+    def __init__(self, voice: Voice, where=None):
+        self.voice = voice
+        self.where = where
+        self.lines: queue.Queue = queue.Queue()
+        self.stopped = False
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def add(self, text: str) -> None:
+        if not text.strip():
+            return
+        self.voice.count += 1
+        path = os.path.join(self.voice.folder, f"line{self.voice.count % 8}.mp3")
+        ready = threading.Event()
+        failed: list[Exception] = []
+
+        def synth():
+            try:
+                self.voice._synth(text, path)
+            except Exception as e:  # no voice for this line; the rest still plays
+                failed.append(e)
+            ready.set()
+
+        threading.Thread(target=synth, daemon=True).start()
+        self.lines.put((path, ready, failed))
+
+    def _run(self) -> None:
+        while True:
+            item = self.lines.get()
+            if item is None or self.stopped:
+                return
+            path, ready, failed = item
+            ready.wait(30)
+            if failed or self.stopped:
+                continue
+            if self.voice.reacting:
+                self.voice.reacting.join(timeout=3)  # let the "Hm." finish first
+            self.voice._play(path, self.where)
+
+    def finish(self) -> None:
+        """Waits until everything added has been spoken."""
+        self.lines.put(None)
+        self.thread.join()
+
+    def stop(self) -> None:
+        self.stopped = True
+        self.lines.put(None)

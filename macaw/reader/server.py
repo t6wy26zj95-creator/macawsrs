@@ -28,6 +28,7 @@ from aiohttp import web
 from .. import books
 from ..db import Store, iso, utcnow
 from ..llm import LLMError
+from ..charlotte import EVENTS
 from . import pictures
 
 log = logging.getLogger(__name__)
@@ -405,6 +406,10 @@ class ReaderServer:
         body = await request.json()
         kind = str(body.get("event") or "")
         said = str(body.get("said") or "")
+        if request.query.get("stream") == "1":
+            if kind not in EVENTS:
+                raise web.HTTPBadRequest(text=f"unknown event {kind!r}")
+            return await self._charlotte_stream(request, uid, kind, said, _game_info(body.get("game")))
         return await self._charlotte_turn(uid, kind, said, _game_info(body.get("game")))
 
     async def charlotte_hear(self, request: web.Request) -> web.Response:
@@ -430,11 +435,45 @@ class ReaderServer:
         if not heard:
             return web.json_response({"say": "", "heard": ""})
         hearing = time.monotonic() - t0
+        if request.query.get("stream") == "1":
+            return await self._charlotte_stream(request, uid, "speech", heard, _game_info(game),
+                                                first={"heard": heard}, timing={"hearing": round(hearing, 1)})
         resp = await self._charlotte_turn(uid, "speech", heard, _game_info(game))
         data = json.loads(resp.text)
         data["heard"] = heard
         data.setdefault("timing", {})["hearing"] = round(hearing, 1)
         return web.json_response(data)
+
+    async def _charlotte_stream(self, request: web.Request, uid: int, kind: str, said: str, game: dict,
+                                first: dict | None = None, timing: dict | None = None) -> web.StreamResponse:
+        """Her reply a sentence at a time, one JSON object per line, so the PC can speak the first sentence
+        while she is still thinking: {"heard"} first (for speech), then {"say"} per sentence, then
+        {"done": {action, graded, ..., timing}}."""
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache",
+                                           "X-Accel-Buffering": "no"})
+        await resp.prepare(request)
+        t0 = time.monotonic()
+
+        async def send(obj: dict) -> None:
+            await resp.write((json.dumps(obj) + "\n").encode())
+
+        async def say(sentence: str) -> None:
+            await send({"say": sentence, "at": round(time.monotonic() - t0, 1)})
+
+        if first:
+            await send(first)
+        try:
+            result = await self.charlotte.event(uid, kind, said, game, on_say=say)
+            done = result.as_dict()
+        except LLMError as e:
+            log.warning("charlotte turn failed: %s", e)
+            await say("Forgive me, Geralt, my head is spinning. Another time.")
+            done = {"say": "", "action": "leave", "error": "unavailable"}
+        done["timing"] = {**(timing or {}), "thinking": round(time.monotonic() - t0, 1)}
+        log.info("charlotte %s (streamed): %.1fs", kind, time.monotonic() - t0)
+        await send({"done": done})
+        await resp.write_eof()
+        return resp
 
     async def _charlotte_turn(self, uid: int, kind: str, said: str, game: dict) -> web.Response:
         t0 = time.monotonic()
