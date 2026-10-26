@@ -20,7 +20,7 @@ import urllib.request
 import uuid
 
 from pad import MuteButton, names
-from voice import Ears, Voice
+from voice import Ears, Voice, place_voice
 from w3link import GameLink, GameNotRunning, parse_fields
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,7 +30,7 @@ log = logging.getLogger("charlotte")
 DEFAULTS = {
     "bot": {"code": ""},
     "game": {"folder": r"C:\games\The Witcher 3 Wild Hunt GOTY", "start_game": "yes", "look": "sorceress"},
-    "voice": {"voice": "en-GB-SoniaNeural", "speed": "+0%"},
+    "voice": {"voice": "en-GB-SoniaNeural", "speed": "+0%", "swap_sides": "no"},
     "mute": {"combo": "LEFT_STICK+RIGHT_STICK", "key": "F9"},
     "timing": {"calm_seconds": "120", "minutes_between": "25", "quiet_nudge_seconds": "120"},
 }
@@ -198,7 +198,7 @@ class Helper:
             log.info("Charlotte: %s", say)
             self.ears.paused = True
             try:
-                self.voice.say(say)
+                self.voice.say(say, self.where_she_is)
             finally:
                 self.ears.paused = False
         action = reply.get("action") or "stay"
@@ -210,6 +210,12 @@ class Helper:
             log.warning("couldn't tell the game %s: %s", action, e)
         if action == "leave":
             self.end_visit()
+
+    def where_she_is(self) -> tuple[float, float]:
+        left, right = place_voice(self.fields.get("ear", ""))
+        if self.cfg["voice"].getboolean("swap_sides"):
+            left, right = right, left
+        return left, right
 
     def in_menu(self) -> bool:
         return self.fields.get("busy") in ("menu", "paused", "fading")

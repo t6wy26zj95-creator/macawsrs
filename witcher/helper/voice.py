@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import io
+import math
 import os
 import queue
 import tempfile
@@ -166,6 +167,27 @@ def _mci(command: str) -> None:
         raise RuntimeError(f"Windows couldn't play the sound (MCI error {err})")
 
 
+def place_voice(ear: str) -> tuple[float, float]:
+    """Left and right loudness for her voice, from the mod's 'ear' line: her position, Geralt's position
+    and the camera direction (tenths of a metre). Closer is louder; to the right of the camera is right."""
+    try:
+        hx, hy, hz, lx, ly, lz, dx, dy, _ = (float(v) / 10 for v in ear.split())
+    except ValueError:
+        return 0.8, 0.8
+    vx, vy = hx - lx, hy - ly
+    dist = math.hypot(vx, vy, hz - lz)
+    flat = math.hypot(vx, vy) or 1.0
+    norm = math.hypot(dx, dy) or 1.0
+    fx, fy = dx / norm, dy / norm  # where the camera looks, on the ground
+    right = (vx * fy - vy * fx) / flat  # -1 fully left .. 1 fully right
+    front = (vx * fx + vy * fy) / flat  # -1 behind .. 1 ahead
+    loud = 1.0 if dist <= 2.5 else max(0.12, 2.5 / dist)
+    if front < 0:
+        loud *= 1 + 0.25 * front  # a little softer from behind
+    angle = (max(-1.0, min(1.0, right * 0.85)) + 1) * math.pi / 4
+    return loud * math.cos(angle) * 1.2, loud * math.sin(angle) * 1.2
+
+
 class Voice:
     def __init__(self, voice: str = "en-GB-SoniaNeural", rate: str = "+0%"):
         self.voice = voice
@@ -173,8 +195,9 @@ class Voice:
         self.folder = tempfile.mkdtemp(prefix="charlotte-")
         self.count = 0
 
-    def say(self, text: str) -> None:
-        """Speaks `text` and returns when she's done."""
+    def say(self, text: str, where=None) -> None:
+        """Speaks `text` and returns when she's done. `where()` gives (left, right) loudness and is asked
+        again while she talks, so her voice follows her as she and the camera move."""
         if not text.strip():
             return
         import edge_tts  # only needed here
@@ -182,6 +205,45 @@ class Voice:
         self.count += 1
         path = os.path.join(self.folder, f"line{self.count % 5}.mp3")
         asyncio.run(edge_tts.Communicate(text, self.voice, rate=self.rate).save(path))
+        try:
+            self._play_placed(path, where or (lambda: (0.8, 0.8)))
+        except ImportError:
+            self._play_plain(path)
+
+    def _play_placed(self, path: str, where) -> None:
+        import miniaudio
+
+        rate = 24000
+        sound = miniaudio.decode_file(path, output_format=miniaudio.SampleFormat.FLOAT32, nchannels=1,
+                                      sample_rate=rate)
+        samples = np.frombuffer(sound.samples, dtype=np.float32)
+        pos, gains, target, asked = 0, np.array(where(), dtype=np.float32), None, 0.0
+        done = threading.Event()
+
+        def callback(out, frames, time_info, status):
+            nonlocal pos, gains
+            chunk = samples[pos:pos + frames]
+            pos += frames
+            goal = target if target is not None else gains
+            ramp = np.linspace(0, 1, len(chunk), dtype=np.float32)[:, None] if len(chunk) else 0
+            mix = gains + (goal - gains) * ramp  # glide to the new place, no clicks
+            out[:] = 0
+            out[:len(chunk)] = chunk[:, None] * mix
+            gains = goal
+            if pos >= len(samples):
+                raise sd.CallbackStop
+
+        with sd.OutputStream(samplerate=rate, channels=2, dtype="float32", callback=callback,
+                             finished_callback=done.set):
+            while not done.wait(0.1):
+                if time.monotonic() - asked > 0.2:
+                    asked = time.monotonic()
+                    try:
+                        target = np.array(where(), dtype=np.float32)
+                    except Exception:
+                        pass
+
+    def _play_plain(self, path: str) -> None:
         alias = f"chl{self.count}"
         _mci(f'open "{path}" type mpegvideo alias {alias}')
         try:

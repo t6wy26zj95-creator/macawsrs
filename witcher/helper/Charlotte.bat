@@ -6,5 +6,7 @@ if not exist .venv\Scripts\python.exe (
   pause
   exit /b
 )
+rem Picks up any library a newer version of the helper needs (quick when nothing is missing).
+.venv\Scripts\python -m pip install --quiet --disable-pip-version-check -r requirements.txt
 .venv\Scripts\python charlotte_helper.py
 pause

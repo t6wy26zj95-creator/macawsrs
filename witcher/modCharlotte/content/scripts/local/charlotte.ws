@@ -199,6 +199,12 @@ exec function chl_poll( seq : int, optional full : int )
 		+ " her " + CHL_B( CHL_Here() ) + " near10 " + IntToString( near )
 		+ " follow " + CHL_B( thePlayer.chlFollowId != 0 ) );
 	CHL_Line( seq, "busy " + busy );
+	if ( thePlayer.chlNpc )
+	{
+		// Where she is from the camera's point of view, so the helper can place her voice.
+		CHL_Line( seq, "ear " + CHL_Pos10( thePlayer.chlNpc.GetWorldPosition() + Vector( 0, 0, 1.6 ) )
+			+ " " + CHL_Pos10( thePlayer.GetWorldPosition() + Vector( 0, 0, 1.6 ) ) + " " + CHL_Pos10( theCamera.GetCameraDirection() ) );
+	}
 	CHL_Line( seq, "area " + NameToString( theGame.GetCommonMapManager().GetCurrentJournalAreaByPosition( thePlayer.GetWorldPosition() ) ) );
 	CHL_Line( seq, "weather " + CHL_Weather() );
 	if ( full == 1 )
@@ -355,6 +361,12 @@ exec function chl_note( seq : int, text : string )
 {
 	theGame.GetGuiManager().ShowNotification( text );
 	CHL_End( seq );
+}
+
+// x,y,z in tenths of a metre (or of a unit, for a direction).
+function CHL_Pos10( v : Vector ) : string
+{
+	return IntToString( RoundF( v.X * 10 ) ) + " " + IntToString( RoundF( v.Y * 10 ) ) + " " + IntToString( RoundF( v.Z * 10 ) );
 }
 
 function CHL_Pos( v : Vector ) : string
