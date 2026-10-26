@@ -169,6 +169,22 @@ class ClaudeCodeProvider:
         while self._ready:
             await self._close(self._ready.pop(next(iter(self._ready))))
 
+    async def prepare(self, system: str, tools: list[ToolSpec]) -> None:
+        """Start a waiting Claude Code process for this kind of turn now (with the current
+        claude_options), so the first real turn of it doesn't wait for Claude Code to start."""
+        opts = claude_options.get()
+        if not opts.warm or not tools:
+            return
+        key = self._key(system, tools, opts)
+        self._kinds.pop(key, None)
+        self._kinds[key] = (system, tools, opts)
+        while len(self._kinds) > self.MAX_READY:
+            old = next(iter(self._kinds))
+            del self._kinds[old]
+            if old in self._ready:
+                await self._close(self._ready.pop(old))
+        self._background(self._warm(key, system, tools, opts))
+
     async def run(self, system: str, prompt: str, tools: list[ToolSpec], must_use_tool: bool = False) -> str:
         # Claude grades reliably from the system prompt, so must_use_tool isn't needed.
         if not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):

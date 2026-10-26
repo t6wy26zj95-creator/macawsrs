@@ -160,6 +160,7 @@ class ReaderServer:
         r.add_get("/api/charlotte/status", self.charlotte_status)
         r.add_post("/api/charlotte/event", self.charlotte_event)
         r.add_post("/api/charlotte/hear", self.charlotte_hear)
+        r.add_post("/api/charlotte/ready", self.charlotte_ready)
         return app
 
     @web.middleware
@@ -390,6 +391,15 @@ class ReaderServer:
         uid = _charlotte_user(self, request)
         return web.json_response(self.charlotte.status(uid))
 
+    async def charlotte_ready(self, request: web.Request) -> web.Response:
+        """The helper is sending her to Geralt: warm up her brain meanwhile."""
+        uid = _charlotte_user(self, request)
+        try:
+            await self.charlotte.prepare(uid)
+        except Exception as e:  # only a speed-up; never worth an error
+            log.warning("charlotte: couldn't prepare: %s", e)
+        return web.json_response({"ok": True})
+
     async def charlotte_event(self, request: web.Request) -> web.Response:
         uid = _charlotte_user(self, request)
         body = await request.json()
@@ -411,6 +421,7 @@ class ReaderServer:
                     game = json.loads(await part.text())
         if not audio or len(audio) > CHARLOTTE_AUDIO_MAX:
             raise web.HTTPBadRequest(text="No audio, or too long.")
+        t0 = time.monotonic()
         try:
             heard = await self.transcribe(audio, "speech.wav")
         except Exception as e:
@@ -418,12 +429,15 @@ class ReaderServer:
             return web.json_response({"say": "", "heard": "", "error": "hearing"})
         if not heard:
             return web.json_response({"say": "", "heard": ""})
+        hearing = time.monotonic() - t0
         resp = await self._charlotte_turn(uid, "speech", heard, _game_info(game))
         data = json.loads(resp.text)
         data["heard"] = heard
+        data.setdefault("timing", {})["hearing"] = round(hearing, 1)
         return web.json_response(data)
 
     async def _charlotte_turn(self, uid: int, kind: str, said: str, game: dict) -> web.Response:
+        t0 = time.monotonic()
         try:
             result = await self.charlotte.event(uid, kind, said, game)
         except ValueError as e:
@@ -433,7 +447,10 @@ class ReaderServer:
             # Out of Claude for now: she excuses herself instead of a weaker model taking over.
             return web.json_response({"say": "Forgive me, Geralt, my head is spinning. Another time.",
                                       "action": "leave", "error": "unavailable"})
-        return web.json_response(result.as_dict())
+        data = result.as_dict()
+        data["timing"] = {"thinking": round(time.monotonic() - t0, 1)}
+        log.info("charlotte %s: %.1fs", kind, time.monotonic() - t0)
+        return web.json_response(data)
 
     async def add_to_deck(self, request: web.Request) -> web.Response:
         uid, row, w = await self._word(request)

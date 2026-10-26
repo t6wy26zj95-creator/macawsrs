@@ -16,6 +16,7 @@ import io
 import math
 import os
 import queue
+import random
 import tempfile
 import threading
 import time
@@ -28,7 +29,7 @@ RATE = 16000
 FRAME = 480  # 30 ms
 PRE_ROLL = 10  # frames kept from just before you started talking
 START_FRAMES = 5  # 150 ms of loud sound starts a recording
-END_SILENCE = 0.9  # seconds of quiet that end it
+END_SILENCE = 0.7  # seconds of quiet that end it
 MAX_SECONDS = 30
 MIN_SECONDS = 0.4
 
@@ -188,27 +189,63 @@ def place_voice(ear: str) -> tuple[float, float]:
     return loud * math.cos(angle) * 1.2, loud * math.sin(angle) * 1.2
 
 
+# Short sounds she makes while thinking (neutral, so they fit whatever you said).
+REACTIONS = ("Hm.", "Mm.", "Hmm...", "Ah.", "Mm-hm.", "Oh?", "Well...")
+
+
 class Voice:
     def __init__(self, voice: str = "en-GB-SoniaNeural", rate: str = "+0%"):
         self.voice = voice
         self.rate = rate
         self.folder = tempfile.mkdtemp(prefix="charlotte-")
         self.count = 0
+        self.reactions: list[str] = []
+        self.reacting: threading.Thread | None = None
 
-    def say(self, text: str, where=None) -> None:
-        """Speaks `text` and returns when she's done. `where()` gives (left, right) loudness and is asked
-        again while she talks, so her voice follows her as she and the camera move."""
-        if not text.strip():
-            return
+    def _synth(self, text: str, path: str) -> None:
         import edge_tts  # only needed here
 
-        self.count += 1
-        path = os.path.join(self.folder, f"line{self.count % 5}.mp3")
         asyncio.run(edge_tts.Communicate(text, self.voice, rate=self.rate).save(path))
+
+    def _play(self, path: str, where) -> None:
         try:
             self._play_placed(path, where or (lambda: (0.8, 0.8)))
         except ImportError:
             self._play_plain(path)
+
+    def prepare_reactions(self) -> None:
+        """Records her short thinking sounds once, in the background, so they can play instantly."""
+        def run():
+            for i, text in enumerate(REACTIONS):
+                path = os.path.join(self.folder, f"react{i}.mp3")
+                try:
+                    self._synth(text, path)
+                    self.reactions.append(path)
+                except Exception:
+                    pass
+        threading.Thread(target=run, daemon=True).start()
+
+    def react(self, where=None) -> None:
+        """A short "Hm." the moment you stop talking, while the real answer is on its way."""
+        if not self.reactions or (self.reacting and self.reacting.is_alive()):
+            return
+        path = random.choice(self.reactions)
+        self.reacting = threading.Thread(target=self._play, args=(path, where), daemon=True)
+        self.reacting.start()
+
+    def say(self, text: str, where=None, on_start=None) -> None:
+        """Speaks `text` and returns when she's done. `where()` gives (left, right) loudness and is asked
+        again while she talks, so her voice follows her as she and the camera move."""
+        if not text.strip():
+            return
+        self.count += 1
+        path = os.path.join(self.folder, f"line{self.count % 5}.mp3")
+        self._synth(text, path)
+        if on_start:
+            on_start()
+        if self.reacting:
+            self.reacting.join(timeout=3)  # let the "Hm." finish first
+        self._play(path, where)
 
     def _play_placed(self, path: str, where) -> None:
         import miniaudio
