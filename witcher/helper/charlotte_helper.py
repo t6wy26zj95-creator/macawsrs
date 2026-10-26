@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import queue
+import random
 import subprocess
 import sys
 import threading
@@ -32,7 +33,7 @@ DEFAULTS = {
     "game": {"folder": r"C:\games\The Witcher 3 Wild Hunt GOTY", "start_game": "yes",
              # who she looks like: an elegant lady; "appearance" keeps the same face every visit (saved on the first)
              "look": "rich_woman", "appearance": ""},
-    "voice": {"voice": "en-GB-SoniaNeural", "speed": "+0%", "swap_sides": "no"},
+    "voice": {"voice": "en-GB-SoniaNeural", "speed": "+0%", "swap_sides": "no", "reactions": "yes"},
     "mute": {"combo": "LEFT_STICK+RIGHT_STICK", "key": "F9"},
     "timing": {"calm_seconds": "120", "minutes_between": "25", "quiet_nudge_seconds": "120"},
 }
@@ -254,6 +255,8 @@ class Helper:
         stopped = time.monotonic()  # you just stopped talking
         self.last_heard = time.time()
         self.nudged = False
+        if self.cfg["voice"].getboolean("reactions") and random.random() < 0.7:
+            self.voice.react(self.where_she_is)
 
         def job():
             reply = self.bot.hear(wav, self.game_info())
@@ -383,6 +386,7 @@ class Helper:
 
     def run(self) -> None:
         threading.Thread(target=self.worker, daemon=True).start()
+        self.voice.prepare_reactions()
         mic_tried = time.time()
         if self.ears.start():
             log.info("mic ready")
