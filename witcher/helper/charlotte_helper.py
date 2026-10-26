@@ -190,6 +190,10 @@ class Helper:
     def answer(self, reply: dict) -> None:
         """Speaks her reply and does what she decided."""
         say = (reply.get("say") or "").strip()
+        waited = 0.0
+        while self.in_menu() and self.state != IDLE and waited < 600:
+            time.sleep(0.3)  # she waits until you're back from the menu
+            waited += 0.3
         if say and self.state != IDLE:
             log.info("Charlotte: %s", say)
             self.ears.paused = True
@@ -206,6 +210,9 @@ class Helper:
             log.warning("couldn't tell the game %s: %s", action, e)
         if action == "leave":
             self.end_visit()
+
+    def in_menu(self) -> bool:
+        return self.fields.get("busy") in ("menu", "paused", "fading")
 
     def end_visit(self) -> None:
         self.state = IDLE
@@ -323,6 +330,10 @@ class Helper:
                 return
         else:
             self.away_since = None
+        self.ears.enabled = not self.muted and not self.in_menu()
+        if self.in_menu():
+            self.last_heard = now  # time in a menu doesn't count as silence
+            return
         if not self.nudged and now - self.last_heard > self.quiet_nudge and self.jobs.empty():
             self.nudged = True
             self.send_event("silence")
