@@ -45,7 +45,7 @@ REGIONS = {
 
 
 def load_config() -> configparser.ConfigParser:
-    cfg = configparser.ConfigParser()
+    cfg = configparser.ConfigParser(interpolation=None)
     cfg.read_dict(DEFAULTS)
     cfg.read(CONFIG, encoding="utf-8")
     return cfg
