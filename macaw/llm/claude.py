@@ -103,12 +103,13 @@ class ClaudeCodeProvider:
 
     async def _start(self, system: str, tools: list[ToolSpec], opts: ClaudeOptions) -> _Ready:
         ready = _Ready({t.name: t for t in tools})
-        server = create_sdk_mcp_server(name=SERVER, tools=self._sdk_tools(tools, ready))
+        # No tools: no tool server either, so nothing extra starts and the reply is one API call.
+        servers = {SERVER: create_sdk_mcp_server(name=SERVER, tools=self._sdk_tools(tools, ready))} if tools else {}
         model = self._model_for(opts)
         options = ClaudeAgentOptions(
             system_prompt=system,
             tools=[],  # no built-in Claude Code tools (no shell, no files)
-            mcp_servers={SERVER: server},
+            mcp_servers=servers,
             strict_mcp_config=True,
             allowed_tools=[f"mcp__{SERVER}__{t.name}" for t in tools],
             setting_sources=[],
@@ -176,7 +177,7 @@ class ClaudeCodeProvider:
         """Start a waiting Claude Code process for this kind of turn now (with the current
         claude_options), so the first real turn of it doesn't wait for Claude Code to start."""
         opts = claude_options.get()
-        if not opts.warm or not tools:
+        if not opts.warm or not (tools or opts.warm_without_tools):
             return
         key = self._key(system, tools, opts)
         self._kinds.pop(key, None)
@@ -200,7 +201,7 @@ class ClaudeCodeProvider:
         key = self._key(system, tools, opts)
         t0 = time.monotonic()
         ready = self._ready.pop(key, None)
-        if opts.warm and tools:  # chat turns; book lookups (no tools) don't push them out
+        if opts.warm and (tools or opts.warm_without_tools):  # chat turns; book lookups (no tools) don't push them out
             self._kinds.pop(key, None)
             self._kinds[key] = (system, tools, opts)
             while len(self._kinds) > self.MAX_READY:
