@@ -297,6 +297,26 @@ class App:
             text, kb = self.transfer.export_menu(m.from_user.id)
             await m.answer(text, reply_markup=kb, parse_mode=None)
 
+        @r.message(Command("charlotte"))
+        async def charlotte_cmd(m: Message):
+            uid = m.from_user and m.from_user.id
+            if uid not in self.config.owner_ids:
+                return
+            if not self.reader_url:
+                await m.answer(
+                    "Charlotte talks to the bot through the same web address as the book reader, "
+                    "and it isn't switched on yet.",
+                    parse_mode=None,
+                )
+                return
+            # A year-long key for the helper program on the PC; it works only for owners.
+            code = f"{self.reader_url}|{make_token(self.config.bot_token, uid, days=365)}"
+            await m.answer(
+                "Your Charlotte pairing code. Paste it into the helper program on your PC when it asks. "
+                "It's yours only, so don't share it.\n\n<code>" + code + "</code>",
+                parse_mode="HTML",
+            )
+
         @r.message(Command("books"))
         async def books_cmd(m: Message):
             if not self._allowed(m.from_user and m.from_user.id):

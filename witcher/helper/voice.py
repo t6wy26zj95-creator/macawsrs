@@ -1,0 +1,134 @@
+"""Charlotte's ears and voice on the PC.
+
+Ears: the mic is read all the time while she's around; when you start talking (louder than the
+room for a moment) recording starts, and a short pause ends it. The recording goes to the bot,
+which turns it into text. With headphones the mic can't hear the game or Charlotte.
+
+Voice: Microsoft's free natural voices (the same ones Edge's "Read aloud" uses), played through
+Windows itself, so no extra player is needed.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import ctypes
+import io
+import os
+import queue
+import tempfile
+import threading
+import time
+import wave
+
+import numpy as np
+import sounddevice as sd
+
+RATE = 16000
+FRAME = 480  # 30 ms
+PRE_ROLL = 10  # frames kept from just before you started talking
+START_FRAMES = 5  # 150 ms of loud sound starts a recording
+END_SILENCE = 0.9  # seconds of quiet that end it
+MAX_SECONDS = 30
+MIN_SECONDS = 0.4
+
+
+class Ears:
+    """Calls `on_speech(wav_bytes)` from a background thread each time you finish saying something."""
+
+    def __init__(self, on_speech, device=None):
+        self.on_speech = on_speech
+        self.device = device
+        self.enabled = False  # listening only while Charlotte is around and the mic isn't muted
+        self.paused = False  # while she speaks
+        self.frames: queue.Queue = queue.Queue()
+        self.floor = 300.0  # background loudness, learned as it goes
+        self.stream = None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self.stream = sd.InputStream(samplerate=RATE, channels=1, dtype="int16", blocksize=FRAME,
+                                     device=self.device, callback=self._on_audio)
+        self.stream.start()
+        self.thread.start()
+
+    def _on_audio(self, data, frames, time_info, status) -> None:
+        self.frames.put(data[:, 0].copy())
+
+    def _run(self) -> None:
+        before: list[np.ndarray] = []
+        speech: list[np.ndarray] = []
+        loud = 0
+        quiet_since = None
+        while True:
+            frame = self.frames.get()
+            if not self.enabled or self.paused:
+                before, speech, loud, quiet_since = [], [], 0, None
+                continue
+            level = float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
+            threshold = max(self.floor * 3.0, 500.0)
+            if not speech:
+                before = (before + [frame])[-PRE_ROLL:]
+                loud = loud + 1 if level > threshold else 0
+                if level <= threshold:
+                    self.floor = self.floor * 0.98 + level * 0.02
+                if loud >= START_FRAMES:
+                    speech, quiet_since = list(before), None
+                continue
+            speech.append(frame)
+            if level > threshold * 0.6:
+                quiet_since = None
+            elif quiet_since is None:
+                quiet_since = time.monotonic()
+            seconds = len(speech) * FRAME / RATE
+            if (quiet_since and time.monotonic() - quiet_since > END_SILENCE) or seconds > MAX_SECONDS:
+                audio = np.concatenate(speech)
+                before, speech, loud, quiet_since = [], [], 0, None
+                if seconds >= MIN_SECONDS:
+                    self.on_speech(to_wav(audio))
+
+
+def to_wav(samples: np.ndarray) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(RATE)
+        w.writeframes(samples.astype(np.int16).tobytes())
+    return buf.getvalue()
+
+
+# ---------------- her voice ----------------
+
+winmm = ctypes.windll.winmm if os.name == "nt" else None
+
+
+def _mci(command: str) -> None:
+    if winmm is None:
+        return
+    err = winmm.mciSendStringW(command, None, 0, None)
+    if err:
+        raise RuntimeError(f"Windows couldn't play the sound (MCI error {err})")
+
+
+class Voice:
+    def __init__(self, voice: str = "en-GB-SoniaNeural", rate: str = "+0%"):
+        self.voice = voice
+        self.rate = rate
+        self.folder = tempfile.mkdtemp(prefix="charlotte-")
+        self.count = 0
+
+    def say(self, text: str) -> None:
+        """Speaks `text` and returns when she's done."""
+        if not text.strip():
+            return
+        import edge_tts  # only needed here
+
+        self.count += 1
+        path = os.path.join(self.folder, f"line{self.count % 5}.mp3")
+        asyncio.run(edge_tts.Communicate(text, self.voice, rate=self.rate).save(path))
+        alias = f"chl{self.count}"
+        _mci(f'open "{path}" type mpegvideo alias {alias}')
+        try:
+            _mci(f"play {alias} wait")
+        finally:
+            _mci(f"close {alias}")

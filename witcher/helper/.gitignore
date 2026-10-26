@@ -1,0 +1,4 @@
+.venv/
+charlotte.ini
+charlotte.log
+__pycache__/

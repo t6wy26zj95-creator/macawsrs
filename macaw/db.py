@@ -211,6 +211,14 @@ CREATE TABLE IF NOT EXISTS books (
 );
 CREATE INDEX IF NOT EXISTS books_user ON books(user_id);
 
+-- Charlotte, the companion in The Witcher 3: her journal, one entry per meeting.
+CREATE TABLE IF NOT EXISTS charlotte_journal (
+    id       INTEGER PRIMARY KEY,
+    user_id  INTEGER NOT NULL,
+    at       TEXT NOT NULL,
+    text     TEXT NOT NULL
+);
+
 -- Reader look (theme, font, size...), JSON, one row per user.
 CREATE TABLE IF NOT EXISTS reader_prefs (
     user_id  INTEGER PRIMARY KEY,
